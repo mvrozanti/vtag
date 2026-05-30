@@ -33,6 +33,7 @@ STATE_FILE = STATE_DIR / "run-state.json"
 LOG_TAIL_BYTES = 32 * 1024
 
 PROGRESS_RE = re.compile(r"\[(\d+)/(\d+)\]\s+(OK|FAIL|SKIP)\b")
+OK_TIME_RE = re.compile(r"\[(\d+)/(\d+)\]\s+OK\s+([\d.]+)s\b")
 DONE_RE = re.compile(r"done:\s+(\d+)\s+tagged,\s+(\d+)\s+skipped,\s+(\d+)\s+failed\s+\(total\s+(\d+)\)")
 
 
@@ -65,7 +66,12 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _scan_log(path: Path) -> dict:
-    out = {"last_n": 0, "last_total": 0, "ok": 0, "fail": 0, "skip": 0, "done": None}
+    out = {
+        "last_n": 0, "last_total": 0,
+        "ok": 0, "fail": 0, "skip": 0,
+        "avg_seconds": None, "images_per_min": None, "eta_seconds": None,
+        "done": None,
+    }
     if not path.exists():
         return out
     try:
@@ -86,6 +92,14 @@ def _scan_log(path: Path) -> dict:
             out["fail"] += 1
         elif kind == "SKIP":
             out["skip"] += 1
+    times = [float(m.group(3)) for m in OK_TIME_RE.finditer(tail)]
+    if times:
+        recent = times[-40:]
+        avg = sum(recent) / len(recent)
+        out["avg_seconds"] = round(avg, 2)
+        out["images_per_min"] = round(60.0 / avg, 2) if avg > 0 else None
+        remaining = max(0, out["last_total"] - out["last_n"])
+        out["eta_seconds"] = int(remaining * avg) if remaining and avg > 0 else 0
     dm = None
     for m in DONE_RE.finditer(tail):
         dm = m
@@ -253,6 +267,8 @@ pre { background: #08090b; border: 1px solid var(--border); border-radius: 6px; 
     <div class="k">started</div><div id="started">–</div>
     <div class="k">log</div><div id="log">–</div>
     <div class="k">ok / fail / skip</div><div id="counts">–</div>
+    <div class="k">avg / rate</div><div id="speed">–</div>
+    <div class="k">eta</div><div id="eta">–</div>
     <div class="k">done</div><div id="done">–</div>
   </div>
 </div>
@@ -263,6 +279,15 @@ pre { background: #08090b; border: 1px solid var(--border); border-radius: 6px; 
 </div>
 
 <script>
+function fmtDuration(s) {
+  s = Math.round(s);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
 async function api(path, opts) {
   const r = await fetch(path, opts);
   return [r.status, await r.json().catch(() => ({}))];
@@ -289,6 +314,12 @@ async function refresh() {
     document.getElementById('bar').style.width = '0%';
     document.getElementById('progress').textContent = '–';
   }
+  document.getElementById('speed').textContent = (p.avg_seconds && p.images_per_min)
+    ? `${p.avg_seconds.toFixed(1)}s/img · ${p.images_per_min.toFixed(1)} img/min`
+    : '–';
+  document.getElementById('eta').textContent = (p.eta_seconds != null && p.eta_seconds > 0)
+    ? fmtDuration(p.eta_seconds)
+    : '–';
   document.getElementById('done').textContent = p.done
     ? `tagged ${p.done.tagged} · skipped ${p.done.skipped} · failed ${p.done.failed} · total ${p.done.total}`
     : '–';
