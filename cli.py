@@ -54,31 +54,59 @@ async def cmd_tag(args: argparse.Namespace) -> int:
     tagged_n = 0
     skipped_n = 0
     failed_n = 0
+    i = 0
 
-    for i, img in enumerate(images, 1):
+    if root.is_file():
         try:
             if not args.force:
-                p = preprocess.probe(img)
-                cached = metadata.already_tagged(img, p.sha256)
+                p = preprocess.probe(images[0])
+                cached = metadata.already_tagged(images[0], p.sha256)
                 if cached is not None:
+                    log.info("[1/1] SKIP %s (already tagged)", images[0])
+                    return 0
+            result = await dispatcher.tag_image_with_retry(
+                images[0], force=args.force, on_busy=_busy_handler,
+            )
+            log.info(
+                "[1/1] OK %.1fs %s -- %s",
+                result.elapsed_seconds, images[0].name, _summary(result.tagged),
+            )
+            return 0
+        except Exception as exc:
+            log.exception("[1/1] FAIL %s: %s", images[0], exc)
+            return 1
+
+    if config.EXIFTOOL_DAEMON:
+        metadata.start_daemon()
+
+    try:
+        for chunk_start in range(0, total, config.BATCH_SIZE):
+            chunk = images[chunk_start : chunk_start + config.BATCH_SIZE]
+            async for path, result, exc in dispatcher.tag_batch(
+                chunk, force=args.force, on_busy=_busy_handler,
+            ):
+                i += 1
+                if exc is not None:
+                    failed_n += 1
+                    log.error("[%d/%d] FAIL %s: %s", i, total, path, exc)
+                    if args.fail_fast:
+                        return 1
+                    continue
+                assert result is not None
+                if result.cached:
                     skipped_n += 1
                     if args.verbose:
-                        log.info("[%d/%d] SKIP %s (already tagged)", i, total, img)
-                    continue
-            result = await dispatcher.tag_image_with_retry(
-                img, force=args.force, on_busy=_busy_handler,
-            )
-            tagged_n += 1
-            summary = _summary(result.tagged)
-            log.info(
-                "[%d/%d] OK %.1fs %s -- %s",
-                i, total, result.elapsed_seconds, img.name, summary,
-            )
-        except Exception as exc:
-            failed_n += 1
-            log.exception("[%d/%d] FAIL %s: %s", i, total, img, exc)
-            if args.fail_fast:
-                return 1
+                        log.info("[%d/%d] SKIP %s (already tagged)", i, total, path)
+                else:
+                    tagged_n += 1
+                    log.info(
+                        "[%d/%d] OK %.1fs %s -- %s",
+                        i, total, result.elapsed_seconds, path.name,
+                        _summary(result.tagged),
+                    )
+    finally:
+        if config.EXIFTOOL_DAEMON:
+            metadata.stop_daemon()
 
     log.info(
         "done: %d tagged, %d skipped, %d failed (total %d)",

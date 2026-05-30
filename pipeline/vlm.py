@@ -58,6 +58,7 @@ async def call(
     prompt: str,
     temperature: float,
     timeout_seconds: float,
+    keep_alive: str | int | None = None,
 ) -> str:
     base = base_url.rstrip("/")
     payload = {
@@ -73,6 +74,11 @@ async def call(
         },
         "format": "json",
     }
+    if keep_alive is not None:
+        try:
+            payload["keep_alive"] = int(keep_alive)
+        except (TypeError, ValueError):
+            payload["keep_alive"] = keep_alive
     async with httpx.AsyncClient(timeout=timeout_seconds) as client:
         resp = await client.post(f"{base}/api/generate", json=payload)
         resp.raise_for_status()

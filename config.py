@@ -12,6 +12,10 @@ VLM_MODEL: str = os.getenv("VTAG_VLM_MODEL", "qwen2.5vl:7b")
 VLM_TIMEOUT_SECONDS: float = float(os.getenv("VTAG_VLM_TIMEOUT", "900"))
 VLM_TEMPERATURE: float = float(os.getenv("VTAG_VLM_TEMPERATURE", "0.1"))
 VLM_MAX_EDGE: int = int(os.getenv("VTAG_VLM_MAX_EDGE", "1280"))
+VLM_KEEP_ALIVE: str = os.getenv("VTAG_VLM_KEEP_ALIVE", "-1")
+
+BATCH_SIZE: int = int(os.getenv("VTAG_BATCH_SIZE", "20"))
+EXIFTOOL_DAEMON: bool = os.getenv("VTAG_EXIFTOOL_DAEMON", "1") != "0"
 
 GPU_LOCK_EXPECTED_SECONDS: float = float(os.getenv("VTAG_GPU_EXPECTED", "20"))
 GPU_BUSY_RETRY_SECONDS: float = float(os.getenv("VTAG_BUSY_RETRY", "5"))
