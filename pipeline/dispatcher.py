@@ -1,4 +1,4 @@
-"""Single entry: tag_image(path). Handles cache, OCR, gpu-lock, VLM, sidecar, eviction."""
+"""Single entry: tag_image(path). Handles cache, OCR, gpu-lock, VLM, embed, eviction."""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,7 @@ from pathlib import Path
 import config
 from gpu_lock import GpuBusy, gpu_lock
 
-from . import ocr, ollama_lifecycle, postprocess, preprocess, schema, sidecar, vlm
+from . import metadata, ocr, ollama_lifecycle, postprocess, preprocess, schema, vlm
 
 log = logging.getLogger(__name__)
 
@@ -18,7 +18,6 @@ log = logging.getLogger(__name__)
 @dataclass
 class TagResult:
     tagged: schema.TaggedImage
-    sidecar_path: Path
     cached: bool
     elapsed_seconds: float
 
@@ -28,11 +27,10 @@ async def tag_image(image_path: Path, *, force: bool = False) -> TagResult:
     p = preprocess.probe(image_path)
 
     if not force:
-        cached = sidecar.already_tagged(image_path, p.sha256)
+        cached = metadata.already_tagged(image_path, p.sha256)
         if cached is not None:
             return TagResult(
                 tagged=cached,
-                sidecar_path=sidecar.sidecar_path(image_path),
                 cached=True,
                 elapsed_seconds=time.time() - started,
             )
@@ -84,10 +82,9 @@ async def tag_image(image_path: Path, *, force: bool = False) -> TagResult:
         source=source,
         model=model,
     )
-    out = sidecar.write_all(image_path, tagged)
+    metadata.write(image_path, tagged)
     return TagResult(
         tagged=tagged,
-        sidecar_path=out,
         cached=False,
         elapsed_seconds=time.time() - started,
     )

@@ -6,14 +6,16 @@ import asyncio
 import json
 import logging
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import config
-from pipeline import dispatcher, preprocess, sidecar
+from pipeline import dispatcher, metadata, preprocess, schema
 
 log = logging.getLogger("vtag")
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+SIDECAR_SUFFIX = ".tags.json"
 
 
 def _setup_logging(level: str) -> None:
@@ -57,7 +59,7 @@ async def cmd_tag(args: argparse.Namespace) -> int:
         try:
             if not args.force:
                 p = preprocess.probe(img)
-                cached = sidecar.already_tagged(img, p.sha256)
+                cached = metadata.already_tagged(img, p.sha256)
                 if cached is not None:
                     skipped_n += 1
                     if args.verbose:
@@ -97,28 +99,31 @@ def _summary(tagged) -> str:
     return " ".join(bits)
 
 
-def cmd_info(args: argparse.Namespace) -> int:
-    image_path = Path(args.path).expanduser().resolve()
+def _require_meta(image_path: Path) -> schema.TaggedImage | None:
     if not image_path.exists():
         log.error("image not found: %s", image_path)
-        return 2
-    existing = sidecar.read_sidecar(image_path)
-    if existing is None:
-        log.error("no sidecar for %s", image_path)
-        return 1
-    print(existing.to_json())
+        return None
+    t = metadata.read(image_path)
+    if t is None:
+        log.error("no embedded vtag metadata in %s (run `vtag tag %s` first)", image_path, image_path)
+        return None
+    return t
+
+
+def cmd_info(args: argparse.Namespace) -> int:
+    image_path = Path(args.path).expanduser().resolve()
+    t = _require_meta(image_path)
+    if t is None:
+        return 1 if image_path.exists() else 2
+    print(json.dumps(asdict(t), indent=2, ensure_ascii=False, sort_keys=False))
     return 0
 
 
 def cmd_show(args: argparse.Namespace) -> int:
     image_path = Path(args.path).expanduser().resolve()
-    if not image_path.exists():
-        log.error("image not found: %s", image_path)
-        return 2
-    t = sidecar.read_sidecar(image_path)
+    t = _require_meta(image_path)
     if t is None:
-        log.error("no sidecar for %s (run `vtag tag %s` first)", image_path, image_path)
-        return 1
+        return 1 if image_path.exists() else 2
     out: list[str] = []
     head_bits = [t.content_type]
     if t.template:
@@ -152,16 +157,63 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 def cmd_tags(args: argparse.Namespace) -> int:
     image_path = Path(args.path).expanduser().resolve()
-    if not image_path.exists():
-        log.error("image not found: %s", image_path)
-        return 2
-    t = sidecar.read_sidecar(image_path)
+    t = _require_meta(image_path)
     if t is None:
-        log.error("no sidecar for %s", image_path)
-        return 1
+        return 1 if image_path.exists() else 2
     for tag in t.tags:
         print(tag)
     return 0
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    root = Path(args.path).expanduser().resolve()
+    if not root.exists():
+        log.error("path does not exist: %s", root)
+        return 2
+
+    sidecars = sorted(root.rglob("*" + SIDECAR_SUFFIX)) if root.is_dir() else [root]
+    sidecars = [p for p in sidecars if p.is_file() and p.name.endswith(SIDECAR_SUFFIX)]
+    if not sidecars:
+        log.warning("no %s files under %s", SIDECAR_SUFFIX, root)
+        return 0
+
+    migrated = 0
+    skipped = 0
+    failed = 0
+    total = len(sidecars)
+
+    for i, sc in enumerate(sidecars, 1):
+        image_path = sc.with_name(sc.name[: -len(SIDECAR_SUFFIX)])
+        if not image_path.exists():
+            log.warning("[%d/%d] image missing for %s", i, total, sc)
+            skipped += 1
+            continue
+        try:
+            tagged = schema.TaggedImage.from_json_file(sc)
+        except Exception as exc:
+            log.warning("[%d/%d] unreadable sidecar %s: %s", i, total, sc, exc)
+            failed += 1
+            continue
+        try:
+            metadata.write(image_path, tagged)
+        except metadata.MetadataError as exc:
+            log.warning("[%d/%d] embed failed for %s: %s", i, total, image_path, exc)
+            failed += 1
+            continue
+        if args.delete:
+            try:
+                sc.unlink()
+            except OSError as exc:
+                log.warning("[%d/%d] could not delete %s: %s", i, total, sc, exc)
+        migrated += 1
+        if args.verbose:
+            log.info("[%d/%d] migrated %s", i, total, image_path)
+
+    log.info(
+        "migrate: %d embedded, %d skipped, %d failed (total %d)",
+        migrated, skipped, failed, total,
+    )
+    return 0 if failed == 0 else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -172,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     p_tag = sub.add_parser("tag", help="Tag an image or directory")
     p_tag.add_argument("path", help="Image file or directory")
     p_tag.add_argument("-r", "--recursive", action="store_true", help="Recurse into subdirs")
-    p_tag.add_argument("-f", "--force", action="store_true", help="Re-tag even if sidecar exists")
+    p_tag.add_argument("-f", "--force", action="store_true", help="Re-tag even if already embedded")
     p_tag.add_argument("-v", "--verbose", action="store_true", help="Log SKIPs")
     p_tag.add_argument("--fail-fast", action="store_true", help="Abort on first failure")
 
@@ -182,8 +234,13 @@ def main(argv: list[str] | None = None) -> int:
     p_tags = sub.add_parser("tags", help="Print just the flat tag list (one per line)")
     p_tags.add_argument("path", help="Image file")
 
-    p_info = sub.add_parser("info", help="Print raw sidecar JSON")
+    p_info = sub.add_parser("info", help="Print embedded vtag payload as JSON")
     p_info.add_argument("path", help="Image file")
+
+    p_mig = sub.add_parser("migrate", help="Embed legacy .tags.json sidecars into images as XMP")
+    p_mig.add_argument("path", help="Image file or directory")
+    p_mig.add_argument("--delete", action="store_true", help="Delete the .tags.json after successful embed")
+    p_mig.add_argument("-v", "--verbose", action="store_true", help="Log each migrated file")
 
     args = parser.parse_args(argv)
     _setup_logging(args.log_level)
@@ -196,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_tags(args)
     if args.cmd == "info":
         return cmd_info(args)
+    if args.cmd == "migrate":
+        return cmd_migrate(args)
 
     parser.error(f"unknown command {args.cmd!r}")
     return 2
