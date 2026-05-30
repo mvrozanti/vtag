@@ -15,6 +15,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -36,9 +37,79 @@ PROGRESS_RE = re.compile(r"\[(\d+)/(\d+)\]\s+(OK|FAIL|SKIP)\b")
 OK_TIME_RE = re.compile(r"\[(\d+)/(\d+)\]\s+OK\s+([\d.]+)s\b")
 DONE_RE = re.compile(r"done:\s+(\d+)\s+tagged,\s+(\d+)\s+skipped,\s+(\d+)\s+failed\s+\(total\s+(\d+)\)")
 
+EXIFTOOL_CONFIG = Path(__file__).resolve().parent / "pipeline" / "exiftool_config.pl"
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif",
+              ".mp4", ".mov", ".mkv", ".webm"}
+SCAN_TTL_SECONDS = 600.0
+
+_scan_cache = {"tagged": 0, "total": 0, "at": 0.0, "scanning": False}
+_scan_lock = threading.Lock()
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _count_images_under(root: Path) -> int:
+    total = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            if os.path.splitext(name)[1].lower() in IMAGE_EXTS:
+                total += 1
+    return total
+
+
+def _scan_target_blocking() -> None:
+    if not TARGET_DIR or not TARGET_DIR.exists():
+        with _scan_lock:
+            _scan_cache.update(scanning=False)
+        return
+    et = shutil.which("exiftool")
+    if not et:
+        with _scan_lock:
+            _scan_cache.update(scanning=False)
+        return
+    started = time.time()
+    try:
+        total = _count_images_under(TARGET_DIR)
+        ext_args: list[str] = []
+        for ext in IMAGE_EXTS:
+            ext_args += ["-ext", ext.lstrip(".")]
+        # One recursive exiftool invocation lets exiftool stream reads + filter
+        # in a single process — much faster than chunking the file list through
+        # python+subprocess on an HDD under concurrent vtag-tag load.
+        result = subprocess.run(
+            [
+                et, "-config", str(EXIFTOOL_CONFIG),
+                "-r", "-q", "-q",
+                *ext_args,
+                "-if", "$XMP-vtag:Payload",
+                "-p", ".",
+                str(TARGET_DIR),
+            ],
+            capture_output=True,
+            timeout=900,
+        )
+        tagged = result.stdout.count(b".\n")
+        with _scan_lock:
+            _scan_cache.update(tagged=tagged, total=total, at=time.time(), scanning=False)
+        log.info("scan: %d tagged / %d total in %.1fs", tagged, total, time.time() - started)
+    except Exception as exc:
+        log.warning("scan failed after %.1fs: %s", time.time() - started, exc)
+        with _scan_lock:
+            _scan_cache["scanning"] = False
+
+
+def _kick_scan_if_stale() -> None:
+    """Launch a background scan if cache is empty or older than SCAN_TTL_SECONDS."""
+    with _scan_lock:
+        if _scan_cache["scanning"]:
+            return
+        age = time.time() - _scan_cache["at"]
+        if _scan_cache["at"] > 0 and age < SCAN_TTL_SECONDS:
+            return
+        _scan_cache["scanning"] = True
+    threading.Thread(target=_scan_target_blocking, daemon=True).start()
 
 
 def _read_state() -> dict:
@@ -127,6 +198,25 @@ def _status() -> dict:
     running = bool(pid) and _pid_alive(int(pid))
     log_file = Path(log_path) if log_path else _latest_log()
     progress = _scan_log(log_file) if log_file else {}
+
+    _kick_scan_if_stale()
+    with _scan_lock:
+        scan_tagged = int(_scan_cache["tagged"])
+        scan_total = int(_scan_cache["total"])
+        scan_at = float(_scan_cache["at"])
+        scan_in_flight = bool(_scan_cache["scanning"])
+
+    new_ok = int(progress.get("ok", 0)) if progress else 0
+    scan_ready = scan_at > 0
+    if scan_ready:
+        tagged_now: int | None = min(scan_total, scan_tagged + new_ok) if scan_total else (scan_tagged + new_ok)
+        untagged = max(0, scan_total - tagged_now)
+    else:
+        tagged_now = None
+        untagged = 0
+    avg = progress.get("avg_seconds") if progress else None
+    eta_seconds = int(untagged * avg) if (avg and untagged) else 0
+
     return {
         "running": running,
         "pid": pid if running else None,
@@ -135,6 +225,12 @@ def _status() -> dict:
         "started_at": state.get("started_at"),
         "stopped_at": None if running else state.get("stopped_at"),
         "progress": progress,
+        "tagged_count": tagged_now,
+        "total_count": scan_total,
+        "untagged_count": untagged,
+        "scan_at": scan_at,
+        "scan_in_flight": scan_in_flight,
+        "eta_seconds": eta_seconds,
         "vtag_bin": VTAG_BIN,
     }
 
@@ -306,20 +402,22 @@ async function refresh() {
   document.getElementById('log').textContent = st.log || '–';
   const p = st.progress || {};
   document.getElementById('counts').textContent = `${p.ok||0} / ${p.fail||0} / ${p.skip||0}`;
-  if (p.last_total) {
-    const pct = Math.round(100 * p.last_n / p.last_total);
+  const tagged = st.tagged_count || 0;
+  const total = st.total_count || 0;
+  if (total) {
+    const pct = Math.round(100 * tagged / total);
     document.getElementById('bar').style.width = pct + '%';
-    document.getElementById('progress').textContent = `${p.last_n} / ${p.last_total} (${pct}%)`;
+    const flight = st.scan_in_flight ? ' · rescanning' : '';
+    document.getElementById('progress').textContent = `${tagged} / ${total} tagged (${pct}%)${flight}`;
   } else {
     document.getElementById('bar').style.width = '0%';
-    document.getElementById('progress').textContent = '–';
+    document.getElementById('progress').textContent = st.scan_in_flight ? 'scanning…' : '–';
   }
   document.getElementById('speed').textContent = (p.avg_seconds && p.images_per_min)
     ? `${p.avg_seconds.toFixed(1)}s/img · ${p.images_per_min.toFixed(1)} img/min`
     : '–';
-  document.getElementById('eta').textContent = (p.eta_seconds != null && p.eta_seconds > 0)
-    ? fmtDuration(p.eta_seconds)
-    : '–';
+  const eta = st.eta_seconds != null && st.eta_seconds > 0 ? st.eta_seconds : 0;
+  document.getElementById('eta').textContent = eta > 0 ? fmtDuration(eta) : '–';
   document.getElementById('done').textContent = p.done
     ? `tagged ${p.done.tagged} · skipped ${p.done.skipped} · failed ${p.done.failed} · total ${p.done.total}`
     : '–';
