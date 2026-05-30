@@ -321,13 +321,20 @@ def read(image_path: Path) -> schema.TaggedImage | None:
         return None
 
 
-def already_tagged(image_path: Path, sha256: str) -> schema.TaggedImage | None:
+def already_tagged(image_path: Path, sha256: str | None = None) -> schema.TaggedImage | None:
+    """Return existing TaggedImage if the image already carries vtag metadata
+    of the current schema version.
+
+    NOTE: ``sha256`` is intentionally NOT compared against ``source.sha256``.
+    Writing the XMP payload mutates the file's bytes, so the stored sha (taken
+    pre-write) and a freshly-computed sha (taken post-write) will always
+    disagree on a re-run. Use ``-f``/``force=True`` upstream to re-tag when
+    the underlying image content has actually changed.
+    """
     existing = read(image_path)
     if existing is None:
         return None
     if existing.schema_version != schema.SCHEMA_VERSION:
-        return None
-    if existing.source.sha256 != sha256:
         return None
     return existing
 

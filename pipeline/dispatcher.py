@@ -33,7 +33,6 @@ class TagResult:
 @dataclass
 class _PreparedItem:
     path: Path
-    started: float
     probe: preprocess.Probe | None = None
     ocr_phrases: list[str] = field(default_factory=list)
     image_bytes: bytes = b""
@@ -136,17 +135,15 @@ async def tag_image_with_retry(
 async def _prepare_one(
     loop: asyncio.AbstractEventLoop, path: Path, force: bool
 ) -> _PreparedItem:
-    item = _PreparedItem(path=path, started=time.time())
+    item = _PreparedItem(path=path)
     try:
-        probe = await loop.run_in_executor(None, preprocess.probe, path)
-        item.probe = probe
         if not force:
-            cached = await loop.run_in_executor(
-                None, metadata.already_tagged, path, probe.sha256
-            )
+            cached = await loop.run_in_executor(None, metadata.already_tagged, path, None)
             if cached is not None:
                 item.cached = cached
                 return item
+        probe = await loop.run_in_executor(None, preprocess.probe, path)
+        item.probe = probe
         item.ocr_phrases = await loop.run_in_executor(None, ocr.extract, path)
         item.image_bytes = await loop.run_in_executor(
             None, preprocess.load_representative_frame, path, config.VLM_MAX_EDGE
@@ -157,11 +154,12 @@ async def _prepare_one(
 
 
 async def _consume_one(item: _PreparedItem) -> TagResult:
+    started = time.time()
     if item.cached is not None:
         return TagResult(
             tagged=item.cached,
             cached=True,
-            elapsed_seconds=time.time() - item.started,
+            elapsed_seconds=0.0,
         )
     probe = item.probe
     assert probe is not None
@@ -201,7 +199,7 @@ async def _consume_one(item: _PreparedItem) -> TagResult:
     return TagResult(
         tagged=tagged,
         cached=False,
-        elapsed_seconds=time.time() - item.started,
+        elapsed_seconds=time.time() - started,
     )
 
 

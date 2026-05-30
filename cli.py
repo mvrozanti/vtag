@@ -95,8 +95,7 @@ async def cmd_tag(args: argparse.Namespace) -> int:
                 assert result is not None
                 if result.cached:
                     skipped_n += 1
-                    if args.verbose:
-                        log.info("[%d/%d] SKIP %s (already tagged)", i, total, path)
+                    log.info("[%d/%d] SKIP %s (already tagged)", i, total, path)
                 else:
                     tagged_n += 1
                     log.info(
