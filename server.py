@@ -128,6 +128,15 @@ def _write_state(state: dict) -> None:
 
 def _pid_alive(pid: int) -> bool:
     try:
+        wpid, _ = os.waitpid(pid, os.WNOHANG)
+        if wpid == pid:
+            return False
+        if wpid == 0:
+            return True
+    except ChildProcessError:
+        pass
+
+    try:
         os.kill(pid, 0)
         return True
     except (ProcessLookupError, PermissionError):
@@ -195,7 +204,7 @@ def _status() -> dict:
     state = _read_state()
     pid = state.get("pid")
     log_path = state.get("log")
-    running = bool(pid) and _pid_alive(int(pid))
+    running = bool(pid) and _pid_alive(int(pid)) and state.get("stopped_at") is None
     log_file = Path(log_path) if log_path else _latest_log()
     progress = _scan_log(log_file) if log_file else {}
 
