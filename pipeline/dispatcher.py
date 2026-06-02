@@ -258,12 +258,6 @@ async def tag_batch(
                         except BaseException as exc:
                             yield item.path, None, exc
                 finally:
-                    try:
-                        await ollama_lifecycle.evict_model(
-                            config.OLLAMA_BASE_URL, config.VLM_MODEL
-                        )
-                    except Exception as exc:
-                        log.warning("evict_model at batch end failed: %s", exc)
                     if producer_task is not None:
                         producer_task.cancel()
                         with contextlib.suppress(BaseException):
