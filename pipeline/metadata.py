@@ -127,10 +127,9 @@ class ExiftoolDaemon:
         self._stderr_offset = 0
         cmd = [
             et,
+            "-config", str(CONFIG_PATH),
             "-stay_open", "True",
             "-@", "-",
-            "-common_args",
-            "-config", str(CONFIG_PATH),
         ]
         self._proc = subprocess.Popen(
             cmd,
