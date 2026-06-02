@@ -42,11 +42,35 @@ class _PreparedItem:
 
 _EOS = object()
 
+_EXT_TO_FORMAT: dict[str, frozenset[str]] = {
+    ".jpg":  frozenset({"JPEG"}),
+    ".jpeg": frozenset({"JPEG"}),
+    ".png":  frozenset({"PNG"}),
+    ".webp": frozenset({"WEBP"}),
+    ".gif":  frozenset({"GIF"}),
+    ".bmp":  frozenset({"BMP"}),
+    ".tiff": frozenset({"TIFF"}),
+    ".tif":  frozenset({"TIFF"}),
+}
+
+
+def _reject_ext_mismatch(path: Path, probe: preprocess.Probe) -> None:
+    """exiftool refuses to write JPEG metadata to a .jpg that's actually a PNG
+    (and similar). Detect with PIL up front so we never pay OCR + VLM only to
+    fail at the write."""
+    expected = _EXT_TO_FORMAT.get(path.suffix.lower())
+    if expected and probe.format not in expected:
+        raise ValueError(
+            f"extension/content mismatch: {path.suffix.lower()} but content is "
+            f"{probe.format} -- rename the file to match its real format"
+        )
+
 
 async def tag_image(image_path: Path, *, force: bool = False) -> TagResult:
     """Single-image path: per-image lock, per-image evict. Used by `vtag tag <file>`."""
     started = time.time()
     p = preprocess.probe(image_path)
+    _reject_ext_mismatch(image_path, p)
 
     if not force:
         cached = metadata.already_tagged(image_path, p.sha256)
@@ -144,6 +168,7 @@ async def _prepare_one(
                 return item
         probe = await loop.run_in_executor(None, preprocess.probe, path)
         item.probe = probe
+        _reject_ext_mismatch(path, probe)
         item.ocr_phrases = await loop.run_in_executor(None, ocr.extract, path)
         item.image_bytes = await loop.run_in_executor(
             None, preprocess.load_representative_frame, path, config.VLM_MAX_EDGE
