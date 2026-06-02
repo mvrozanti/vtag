@@ -215,16 +215,32 @@ def _status() -> dict:
         scan_at = float(_scan_cache["at"])
         scan_in_flight = bool(_scan_cache["scanning"])
 
-    new_ok = int(progress.get("ok", 0)) if progress else 0
+    log_n = int(progress.get("last_n", 0)) if progress else 0
+    log_total = int(progress.get("last_total", 0)) if progress else 0
+    log_eta = progress.get("eta_seconds") if progress else None
+    done = progress.get("done") if progress else None
     scan_ready = scan_at > 0
-    if scan_ready:
-        tagged_now: int | None = min(scan_total, scan_tagged + new_ok) if scan_total else (scan_tagged + new_ok)
-        untagged = max(0, scan_total - tagged_now)
+
+    if done:
+        tagged_now: int | None = int(done.get("tagged", 0)) + int(done.get("skipped", 0))
+        total_now = int(done.get("total", 0)) or (log_total or scan_total)
+        eta_seconds = 0
+    elif log_total > 0:
+        tagged_now = log_n
+        total_now = log_total
+        eta_seconds = int(log_eta) if log_eta is not None else 0
+    elif scan_ready:
+        tagged_now = min(scan_total, scan_tagged) if scan_total else scan_tagged
+        total_now = scan_total
+        avg = progress.get("avg_seconds") if progress else None
+        untagged_for_eta = max(0, total_now - tagged_now)
+        eta_seconds = int(untagged_for_eta * avg) if (avg and untagged_for_eta) else 0
     else:
         tagged_now = None
-        untagged = 0
-    avg = progress.get("avg_seconds") if progress else None
-    eta_seconds = int(untagged * avg) if (avg and untagged) else 0
+        total_now = scan_total
+        eta_seconds = 0
+
+    untagged = max(0, total_now - tagged_now) if tagged_now is not None else 0
 
     return {
         "running": running,
@@ -235,7 +251,7 @@ def _status() -> dict:
         "stopped_at": None if running else state.get("stopped_at"),
         "progress": progress,
         "tagged_count": tagged_now,
-        "total_count": scan_total,
+        "total_count": total_now,
         "untagged_count": untagged,
         "scan_at": scan_at,
         "scan_in_flight": scan_in_flight,
