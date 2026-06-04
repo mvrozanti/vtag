@@ -10,19 +10,47 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+from webui import cache as webui_cache
+from webui import events as webui_events
+from webui import thumbs as webui_thumbs
 
 log = logging.getLogger("vtag-server")
+
+STATIC_DIR = Path(__file__).resolve().parent / "webui" / "static"
+FIND_SCRIPT = Path(__file__).resolve().parent / "find.py"
+
+_STATIC_MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+}
+
+_reindex_state: dict = {"pid": None, "started_at": None}
+_reindex_lock = threading.Lock()
 
 HOST = os.getenv("VTAG_HUB_LISTEN_HOST", "0.0.0.0")
 PORT = int(os.getenv("VTAG_HUB_LISTEN_PORT", "8093"))
@@ -340,134 +368,37 @@ def _read_log_tail() -> str:
         return f"(log read failed: {exc})"
 
 
-HTML = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>vtag.mvr.ac · runner</title>
-<style>
-:root { --bg:#0e0f12; --fg:#d9d9d9; --muted:#888; --accent:#6cf; --hover:#1a1c22; --border:#2a2c33; }
-* { box-sizing: border-box; }
-body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg); margin: 0; padding: 24px; line-height: 1.45; }
-h1 { margin: 0 0 4px 0; font-size: 1.4rem; }
-.muted { color: var(--muted); }
-.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
-.card { background: var(--hover); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 12px 0; }
-button { background: #1a1c22; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 14px; font-size: 0.95rem; cursor: pointer; }
-button:hover { border-color: var(--accent); }
-button[disabled] { opacity: 0.4; cursor: not-allowed; }
-.bar { background: #2a2c33; height: 12px; border-radius: 6px; overflow: hidden; flex: 1; min-width: 200px; }
-.bar-fill { background: var(--accent); height: 100%; width: 0%; transition: width 0.3s; }
-.kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; font-size: 0.9rem; }
-.kv .k { color: var(--muted); }
-pre { background: #08090b; border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow: auto; max-height: 380px; font-size: 0.82rem; }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
-.dot.on { background: #4ade80; }
-.dot.off { background: #555; }
-</style>
-</head>
-<body>
-<h1>vtag · runner</h1>
-<div class="muted">local VLM image tagger · status / restart</div>
+def _reindex_status() -> dict:
+    with _reindex_lock:
+        pid = _reindex_state.get("pid")
+        if pid and _pid_alive(int(pid)):
+            return {"running": True, "pid": int(pid), "started_at": _reindex_state.get("started_at")}
+        if pid:
+            _reindex_state["pid"] = None
+        return {"running": False, "pid": None, "started_at": _reindex_state.get("started_at")}
 
-<div class="card">
-  <div class="row">
-    <div><span class="dot off" id="dot"></span><span id="state">…</span></div>
-    <div style="flex:1"></div>
-    <button id="btn-start">start run</button>
-    <button id="btn-stop" disabled>stop run</button>
-    <button id="btn-refresh">refresh</button>
-  </div>
-  <div class="row">
-    <div class="bar"><div class="bar-fill" id="bar"></div></div>
-    <div class="muted" id="progress">–</div>
-  </div>
-  <div class="kv">
-    <div class="k">target</div><div id="target">–</div>
-    <div class="k">pid</div><div id="pid">–</div>
-    <div class="k">started</div><div id="started">–</div>
-    <div class="k">log</div><div id="log">–</div>
-    <div class="k">ok / fail / skip</div><div id="counts">–</div>
-    <div class="k">avg / rate</div><div id="speed">–</div>
-    <div class="k">eta</div><div id="eta">–</div>
-    <div class="k">done</div><div id="done">–</div>
-  </div>
-</div>
 
-<div class="card">
-  <div class="row" style="justify-content:space-between"><b>log tail</b><span class="muted" id="log-meta"></span></div>
-  <pre id="log-pre">(loading)</pre>
-</div>
-
-<script>
-function fmtDuration(s) {
-  s = Math.round(s);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h) return `${h}h ${m}m`;
-  if (m) return `${m}m ${sec}s`;
-  return `${sec}s`;
-}
-async function api(path, opts) {
-  const r = await fetch(path, opts);
-  return [r.status, await r.json().catch(() => ({}))];
-}
-async function logTail() {
-  const r = await fetch('/api/log');
-  return await r.text();
-}
-async function refresh() {
-  const [_s, st] = await api('/api/status');
-  document.getElementById('state').textContent = st.running ? 'running' : 'idle';
-  document.getElementById('dot').className = 'dot ' + (st.running ? 'on' : 'off');
-  document.getElementById('target').textContent = st.target_dir || '(unset)';
-  document.getElementById('pid').textContent = st.pid || '–';
-  document.getElementById('started').textContent = st.started_at || '–';
-  document.getElementById('log').textContent = st.log || '–';
-  const p = st.progress || {};
-  document.getElementById('counts').textContent = `${p.ok||0} / ${p.fail||0} / ${p.skip||0}`;
-  const tagged = st.tagged_count || 0;
-  const total = st.total_count || 0;
-  if (total) {
-    const pct = Math.round(100 * tagged / total);
-    document.getElementById('bar').style.width = pct + '%';
-    const flight = st.scan_in_flight ? ' · rescanning' : '';
-    document.getElementById('progress').textContent = `${tagged} / ${total} tagged (${pct}%)${flight}`;
-  } else {
-    document.getElementById('bar').style.width = '0%';
-    document.getElementById('progress').textContent = st.scan_in_flight ? 'scanning…' : '–';
-  }
-  document.getElementById('speed').textContent = (p.avg_seconds && p.images_per_min)
-    ? `${p.avg_seconds.toFixed(1)}s/img · ${p.images_per_min.toFixed(1)} img/min`
-    : '–';
-  const eta = st.eta_seconds != null && st.eta_seconds > 0 ? st.eta_seconds : 0;
-  document.getElementById('eta').textContent = eta > 0 ? fmtDuration(eta) : '–';
-  document.getElementById('done').textContent = p.done
-    ? `tagged ${p.done.tagged} · skipped ${p.done.skipped} · failed ${p.done.failed} · total ${p.done.total}`
-    : '–';
-  document.getElementById('btn-start').disabled = st.running;
-  document.getElementById('btn-stop').disabled = !st.running;
-  document.getElementById('log-meta').textContent = st.log ? st.log.split('/').pop() : '';
-  document.getElementById('log-pre').textContent = await logTail();
-}
-document.getElementById('btn-start').onclick = async () => {
-  const [s, b] = await api('/api/start', {method:'POST'});
-  if (s >= 400) alert(b.error || 'start failed');
-  await refresh();
-};
-document.getElementById('btn-stop').onclick = async () => {
-  const [s, b] = await api('/api/stop', {method:'POST'});
-  if (s >= 400) alert(b.error || 'stop failed');
-  await refresh();
-};
-document.getElementById('btn-refresh').onclick = refresh;
-refresh();
-setInterval(refresh, 5000);
-</script>
-</body>
-</html>
-"""
+def _reindex_start() -> tuple[int, dict]:
+    status = _reindex_status()
+    if status["running"]:
+        return HTTPStatus.CONFLICT, {"error": "reindex already running", **status}
+    if not FIND_SCRIPT.exists():
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"find.py not found at {FIND_SCRIPT}"}
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(FIND_SCRIPT), "--json"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"spawn failed: {exc}"}
+    with _reindex_lock:
+        _reindex_state["pid"] = proc.pid
+        _reindex_state["started_at"] = _now_iso()
+    return HTTPStatus.ACCEPTED, {"started": True, "pid": proc.pid}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -494,28 +425,188 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self) -> None:
-        if self.path == "/" or self.path == "/index.html":
-            self._text(HTTPStatus.OK, HTML, "text/html; charset=utf-8")
+    def _bytes(self, code: int, body: bytes, content_type: str, *, cache: str = "no-store") -> None:
+        self.send_response(code)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(body)))
+        self.send_header("cache-control", cache)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_static(self, rel_path: str) -> None:
+        rel_path = rel_path.lstrip("/")
+        if not rel_path:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
-        if self.path == "/healthz":
+        target = (STATIC_DIR / rel_path).resolve()
+        try:
+            target.relative_to(STATIC_DIR.resolve())
+        except ValueError:
+            self._json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+            return
+        if not target.is_file():
+            self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+        suffix = target.suffix.lower()
+        ctype = _STATIC_MIME.get(suffix) or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        try:
+            data = target.read_bytes()
+        except OSError as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"read failed: {exc}"})
+            return
+        self._bytes(HTTPStatus.OK, data, ctype, cache="no-cache, must-revalidate")
+
+    def _serve_thumb(self, sha: str) -> None:
+        sha = (sha or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{16,64}", sha):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid sha"})
+            return
+        existing = webui_thumbs.thumb_path(sha)
+        if existing.exists() and existing.stat().st_size > 0:
+            try:
+                data = existing.read_bytes()
+            except OSError as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+                return
+            self._bytes(HTTPStatus.OK, data, "image/jpeg", cache="public, max-age=86400")
+            return
+        conn = webui_cache.open_ro()
+        if conn is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
+            return
+        try:
+            hit = webui_cache.by_sha(conn, sha)
+        finally:
+            conn.close()
+        if hit is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
+            return
+        source_path, _payload = hit
+        out = webui_thumbs.ensure(sha, source_path)
+        if out is None or not out.exists():
+            self._json(HTTPStatus.NOT_FOUND, {"error": "thumbnail unavailable"})
+            return
+        try:
+            data = out.read_bytes()
+        except OSError as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
+        self._bytes(HTTPStatus.OK, data, "image/jpeg", cache="public, max-age=86400")
+
+    def _serve_recent(self, qs: dict[str, list[str]]) -> None:
+        try:
+            limit = max(1, min(200, int(qs.get("limit", ["60"])[0])))
+            offset = max(0, int(qs.get("offset", ["0"])[0]))
+        except ValueError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "limit/offset must be int"})
+            return
+        content_type = qs.get("content_type", [None])[0]
+        conn = webui_cache.open_ro()
+        if conn is None:
+            self._json(HTTPStatus.OK, {"cache_available": False, "items": [], "meta": webui_cache.cache_meta(None)})
+            return
+        try:
+            items = webui_cache.recent(conn, limit=limit, offset=offset, content_type=content_type)
+            meta = webui_cache.cache_meta(conn)
+        finally:
+            conn.close()
+        self._json(HTTPStatus.OK, {"cache_available": True, "items": items, "meta": meta})
+
+    def _serve_item(self, qs: dict[str, list[str]]) -> None:
+        sha = (qs.get("sha", [""])[0] or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{16,64}", sha):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid sha"})
+            return
+        conn = webui_cache.open_ro()
+        if conn is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
+            return
+        try:
+            hit = webui_cache.by_sha(conn, sha)
+        finally:
+            conn.close()
+        if hit is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
+            return
+        path, payload = hit
+        self._json(HTTPStatus.OK, {"path": path, "payload": payload})
+
+    def _serve_events(self, qs: dict[str, list[str]]) -> None:
+        kind = (qs.get("kind", ["fail"])[0] or "fail").upper()
+        if kind not in {"FAIL", "SKIP", "OK"}:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "kind must be fail|skip|ok"})
+            return
+        try:
+            limit = max(1, min(500, int(qs.get("limit", ["100"])[0])))
+        except ValueError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "limit must be int"})
+            return
+        events = webui_events.latest_events(LOG_DIR, kind=kind, limit=limit)
+        log_path = webui_events.latest_log(LOG_DIR)
+        self._json(HTTPStatus.OK, {
+            "kind": kind,
+            "items": events,
+            "log": str(log_path) if log_path else None,
+        })
+
+    def _serve_cache_meta(self) -> None:
+        conn = webui_cache.open_ro()
+        try:
+            meta = webui_cache.cache_meta(conn)
+        finally:
+            if conn is not None:
+                conn.close()
+        meta["reindex"] = _reindex_status()
+        self._json(HTTPStatus.OK, meta)
+
+    def do_GET(self) -> None:
+        parsed = urlsplit(self.path)
+        path, qs = parsed.path, parse_qs(parsed.query)
+        if path == "/" or path == "/index.html":
+            self._serve_static("index.html")
+            return
+        if path.startswith("/static/"):
+            self._serve_static(path[len("/static/"):])
+            return
+        if path == "/healthz":
             self._json(HTTPStatus.OK, {"ok": True})
             return
-        if self.path == "/api/status":
+        if path == "/api/status":
             self._json(HTTPStatus.OK, _status())
             return
-        if self.path == "/api/log":
+        if path == "/api/log":
             self._text(HTTPStatus.OK, _read_log_tail())
+            return
+        if path == "/api/recent":
+            self._serve_recent(qs)
+            return
+        if path == "/api/item":
+            self._serve_item(qs)
+            return
+        if path == "/api/thumb":
+            self._serve_thumb(qs.get("sha", [""])[0])
+            return
+        if path == "/api/events":
+            self._serve_events(qs)
+            return
+        if path == "/api/cache_meta":
+            self._serve_cache_meta()
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path == "/api/start":
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        if path == "/api/start":
             code, body = _start()
             self._json(code, body)
             return
-        if self.path == "/api/stop":
+        if path == "/api/stop":
             code, body = _stop()
+            self._json(code, body)
+            return
+        if path == "/api/reindex":
+            code, body = _reindex_start()
             self._json(code, body)
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
