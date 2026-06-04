@@ -53,24 +53,48 @@ _EXT_TO_FORMAT: dict[str, frozenset[str]] = {
     ".tif":  frozenset({"TIFF"}),
 }
 
+_FORMAT_TO_EXT: dict[str, str] = {
+    "JPEG": ".jpg",
+    "PNG":  ".png",
+    "WEBP": ".webp",
+    "GIF":  ".gif",
+    "BMP":  ".bmp",
+    "TIFF": ".tiff",
+}
 
-def _reject_ext_mismatch(path: Path, probe: preprocess.Probe) -> None:
+
+def _fix_ext_mismatch(path: Path, probe: preprocess.Probe) -> Path:
     """exiftool refuses to write JPEG metadata to a .jpg that's actually a PNG
-    (and similar). Detect with PIL up front so we never pay OCR + VLM only to
-    fail at the write."""
+    (and similar). Rename to the canonical extension up front so the rest of
+    the pipeline sees a consistent path/format pair.
+    """
     expected = _EXT_TO_FORMAT.get(path.suffix.lower())
-    if expected and probe.format not in expected:
+    if not expected or probe.format in expected:
+        return path
+    target_ext = _FORMAT_TO_EXT.get(probe.format)
+    if not target_ext:
         raise ValueError(
             f"extension/content mismatch: {path.suffix.lower()} but content is "
-            f"{probe.format} -- rename the file to match its real format"
+            f"{probe.format}; no canonical extension known for that format"
         )
+    new_path = path.with_suffix(target_ext)
+    if new_path == path:
+        return path
+    if new_path.exists():
+        raise FileExistsError(
+            f"extension/content mismatch: would rename {path.name} -> "
+            f"{new_path.name}, but the target already exists"
+        )
+    path.rename(new_path)
+    log.info("renamed %s -> %s (content was %s)", path.name, new_path.name, probe.format)
+    return new_path
 
 
 async def tag_image(image_path: Path, *, force: bool = False) -> TagResult:
     """Single-image path: per-image lock, per-image evict. Used by `vtag tag <file>`."""
     started = time.time()
     p = preprocess.probe(image_path)
-    _reject_ext_mismatch(image_path, p)
+    image_path = _fix_ext_mismatch(image_path, p)
 
     if not force:
         cached = metadata.already_tagged(image_path, p.sha256)
@@ -168,7 +192,8 @@ async def _prepare_one(
                 return item
         probe = await loop.run_in_executor(None, preprocess.probe, path)
         item.probe = probe
-        _reject_ext_mismatch(path, probe)
+        path = await loop.run_in_executor(None, _fix_ext_mismatch, path, probe)
+        item.path = path
         item.ocr_phrases = await loop.run_in_executor(None, ocr.extract, path)
         item.image_bytes = await loop.run_in_executor(
             None, preprocess.load_representative_frame, path, config.VLM_MAX_EDGE
