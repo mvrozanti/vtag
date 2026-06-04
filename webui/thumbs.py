@@ -62,8 +62,6 @@ def ensure(sha: str, source_path: str) -> Path | None:
     except OSError:
         pass
     ext = os.path.splitext(source_path)[1].lower()
-    if ext in VIDEO_EXTS:
-        return None
     lock = _lock_for(sha)
     with lock:
         try:
@@ -72,14 +70,28 @@ def ensure(sha: str, source_path: str) -> Path | None:
         except OSError:
             pass
         try:
-            with Image.open(source_path) as im:
+            if ext in VIDEO_EXTS:
+                from pipeline import preprocess
+                im = preprocess.load_representative_image(Path(source_path))
+            else:
+                with Image.open(source_path) as src:
+                    im = src.convert("RGB")
+            if im.mode != "RGB":
                 im = im.convert("RGB")
-                im.thumbnail((THUMB_EDGE, THUMB_EDGE), Image.LANCZOS)
-                tmp = out.with_suffix(".jpg.tmp")
-                im.save(tmp, "JPEG", quality=THUMB_QUALITY, optimize=True)
-                os.replace(tmp, out)
+            im.thumbnail((THUMB_EDGE, THUMB_EDGE), Image.LANCZOS)
+            tmp = out.with_suffix(".jpg.tmp")
+            im.save(tmp, "JPEG", quality=THUMB_QUALITY, optimize=True)
+            os.replace(tmp, out)
         except (OSError, UnidentifiedImageError, ValueError) as exc:
             log.warning("thumbnail failed for %s: %s", source_path, exc)
+            try:
+                out.with_suffix(".jpg.tmp").unlink(missing_ok=True)
+            except OSError:
+                pass
+            _drop_lock(sha)
+            return None
+        except Exception as exc:
+            log.warning("video thumbnail failed for %s: %s", source_path, exc)
             try:
                 out.with_suffix(".jpg.tmp").unlink(missing_ok=True)
             except OSError:

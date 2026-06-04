@@ -119,6 +119,22 @@ def _scan_target_blocking() -> None:
             timeout=900,
         )
         tagged = result.stdout.count(b".\n")
+        # mkv/webm cannot carry embedded XMP — their payload lives in a
+        # sibling `<name>.xmp` sidecar. One sidecar with payload = one tagged
+        # matroska media file.
+        sidecar_result = subprocess.run(
+            [
+                et, "-config", str(EXIFTOOL_CONFIG),
+                "-r", "-q", "-q",
+                "-ext", "xmp",
+                "-if", "$XMP-vtag:Payload",
+                "-p", ".",
+                str(TARGET_DIR),
+            ],
+            capture_output=True,
+            timeout=900,
+        )
+        tagged += sidecar_result.stdout.count(b".\n")
         with _scan_lock:
             _scan_cache.update(tagged=tagged, total=total, at=time.time(), scanning=False)
         log.info("scan: %d tagged / %d total in %.1fs", tagged, total, time.time() - started)

@@ -14,7 +14,8 @@ from pipeline import dispatcher, metadata, preprocess, schema
 
 log = logging.getLogger("vtag")
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif",
+              ".mp4", ".mov", ".mkv", ".webm"}
 SIDECAR_SUFFIX = ".tags.json"
 
 

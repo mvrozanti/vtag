@@ -25,7 +25,29 @@ IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif",
     ".mp4", ".mov", ".mkv", ".webm",
 }
+SIDECAR_EXTS = {".mkv", ".webm"}
+SIDECAR_SUFFIX = ".xmp"
 EXIFTOOL_CONFIG = Path(__file__).resolve().parent / "pipeline" / "exiftool_config.pl"
+
+
+def _xmp_target(media_path: str) -> str:
+    if os.path.splitext(media_path)[1].lower() in SIDECAR_EXTS:
+        return media_path + SIDECAR_SUFFIX
+    return media_path
+
+
+def _meta_stat(media_path: str) -> tuple[int, int]:
+    """Stat of the file that actually carries the XMP for ``media_path``.
+
+    For sidecar formats this is the `<media>.xmp` file (which may not exist
+    yet, in which case we return zeros and let exiftool report "no payload").
+    """
+    target = _xmp_target(media_path)
+    try:
+        st = os.stat(target)
+    except OSError:
+        return 0, 0
+    return int(st.st_mtime), int(st.st_size)
 CACHE_DIR = Path(os.getenv("VTAG_CACHE_DIR", str(Path.home() / ".cache/vtag")))
 CACHE_DB = CACHE_DIR / "index.sqlite"
 CACHE_SCHEMA_VERSION = 1
@@ -71,15 +93,23 @@ def _open_db() -> sqlite3.Connection:
 
 
 def _iter_image_files(roots: list[Path]) -> list[tuple[str, int, int]]:
+    """Walk media files; the (mtime, size) returned is for the XMP-bearing
+    file (media itself or its `.xmp` sidecar), so cache invalidation triggers
+    on metadata changes for sidecar formats too.
+    """
     out: list[tuple[str, int, int]] = []
     for root in roots:
         if root.is_file():
             if root.suffix.lower() in IMAGE_EXTS:
-                try:
-                    st = root.stat()
-                except OSError:
-                    continue
-                out.append((str(root), int(st.st_mtime), int(st.st_size)))
+                full = str(root)
+                mtime, size = _meta_stat(full)
+                if mtime == 0:
+                    try:
+                        st = root.stat()
+                        mtime, size = int(st.st_mtime), int(st.st_size)
+                    except OSError:
+                        continue
+                out.append((full, mtime, size))
             continue
         for dirpath, _dirs, files in os.walk(root):
             for name in files:
@@ -87,11 +117,14 @@ def _iter_image_files(roots: list[Path]) -> list[tuple[str, int, int]]:
                 if ext not in IMAGE_EXTS:
                     continue
                 full = os.path.join(dirpath, name)
-                try:
-                    st = os.stat(full)
-                except OSError:
-                    continue
-                out.append((full, int(st.st_mtime), int(st.st_size)))
+                mtime, size = _meta_stat(full)
+                if mtime == 0:
+                    try:
+                        st = os.stat(full)
+                        mtime, size = int(st.st_mtime), int(st.st_size)
+                    except OSError:
+                        continue
+                out.append((full, mtime, size))
     return out
 
 
@@ -103,11 +136,26 @@ def _refresh_batch(paths: list[str]) -> dict[str, str | None]:
     et = _exiftool_bin()
     if not et:
         raise RuntimeError("exiftool not in PATH")
+    # Map each media path to its XMP-bearing file (self or sidecar). Skip
+    # sidecar files that don't exist yet — exiftool would error on them.
+    target_for: dict[str, str] = {}
+    media_for: dict[str, str] = {}
+    targets: list[str] = []
+    for p in paths:
+        t = _xmp_target(p)
+        if t != p and not os.path.exists(t):
+            continue
+        target_for[p] = t
+        media_for[t] = p
+        targets.append(t)
+    out: dict[str, str | None] = {p: None for p in paths}
+    if not targets:
+        return out
     args = [
         et, "-config", str(EXIFTOOL_CONFIG),
         "-j", "-G1", "-s",
         "-XMP-vtag:Payload",
-        *paths,
+        *targets,
     ]
     result = subprocess.run(args, capture_output=True, timeout=600)
     if result.returncode != 0:
@@ -115,14 +163,16 @@ def _refresh_batch(paths: list[str]) -> dict[str, str | None]:
     try:
         rows = json.loads(result.stdout.decode("utf-8") or "[]")
     except json.JSONDecodeError:
-        return {p: None for p in paths}
-    out: dict[str, str | None] = {p: None for p in paths}
+        return out
     for row in rows:
         source_file = row.get("SourceFile") or ""
         if not source_file:
             continue
+        media = media_for.get(source_file)
+        if media is None:
+            continue
         payload = row.get("XMP-vtag:Payload") or row.get("Payload")
-        out[source_file] = payload or None
+        out[media] = payload or None
     return out
 
 

@@ -51,6 +51,10 @@ _EXT_TO_FORMAT: dict[str, frozenset[str]] = {
     ".bmp":  frozenset({"BMP"}),
     ".tiff": frozenset({"TIFF"}),
     ".tif":  frozenset({"TIFF"}),
+    ".mp4":  frozenset({"MP4"}),
+    ".mov":  frozenset({"MOV"}),
+    ".mkv":  frozenset({"MKV"}),
+    ".webm": frozenset({"WEBM"}),
 }
 
 _FORMAT_TO_EXT: dict[str, str] = {
@@ -60,6 +64,10 @@ _FORMAT_TO_EXT: dict[str, str] = {
     "GIF":  ".gif",
     "BMP":  ".bmp",
     "TIFF": ".tiff",
+    "MP4":  ".mp4",
+    "MOV":  ".mov",
+    "MKV":  ".mkv",
+    "WEBM": ".webm",
 }
 
 
@@ -106,12 +114,20 @@ async def tag_image(image_path: Path, *, force: bool = False) -> TagResult:
             )
 
     loop = asyncio.get_running_loop()
-    ocr_phrases = await loop.run_in_executor(None, ocr.extract, image_path)
+    if preprocess.is_video(image_path):
+        pil_img = await loop.run_in_executor(
+            None, preprocess.load_representative_image, image_path
+        )
+        ocr_phrases = await loop.run_in_executor(None, ocr.extract_from_image, pil_img)
+        image_bytes = await loop.run_in_executor(
+            None, preprocess.encode_for_vlm, pil_img, config.VLM_MAX_EDGE
+        )
+    else:
+        ocr_phrases = await loop.run_in_executor(None, ocr.extract, image_path)
+        image_bytes = await loop.run_in_executor(
+            None, preprocess.load_representative_frame, image_path, config.VLM_MAX_EDGE
+        )
     ocr_text = ocr.render_for_prompt(ocr_phrases)
-
-    image_bytes = await loop.run_in_executor(
-        None, preprocess.load_representative_frame, image_path, config.VLM_MAX_EDGE
-    )
 
     prompt = vlm.render_prompt(ocr_text)
     source = schema.Source(
@@ -194,10 +210,21 @@ async def _prepare_one(
         item.probe = probe
         path = await loop.run_in_executor(None, _fix_ext_mismatch, path, probe)
         item.path = path
-        item.ocr_phrases = await loop.run_in_executor(None, ocr.extract, path)
-        item.image_bytes = await loop.run_in_executor(
-            None, preprocess.load_representative_frame, path, config.VLM_MAX_EDGE
-        )
+        if preprocess.is_video(path):
+            pil_img = await loop.run_in_executor(
+                None, preprocess.load_representative_image, path
+            )
+            item.ocr_phrases = await loop.run_in_executor(
+                None, ocr.extract_from_image, pil_img
+            )
+            item.image_bytes = await loop.run_in_executor(
+                None, preprocess.encode_for_vlm, pil_img, config.VLM_MAX_EDGE
+            )
+        else:
+            item.ocr_phrases = await loop.run_in_executor(None, ocr.extract, path)
+            item.image_bytes = await loop.run_in_executor(
+                None, preprocess.load_representative_frame, path, config.VLM_MAX_EDGE
+            )
     except BaseException as exc:
         item.error = exc
     return item

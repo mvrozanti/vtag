@@ -23,9 +23,32 @@ log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).resolve().parent / "exiftool_config.pl"
 
-XMP_WRITABLE_FORMATS = frozenset({
-    "JPEG", "PNG", "WEBP", "TIFF", "GIF", "MP4", "MOV", "MKV", "WEBM",
+# exiftool can embed XMP directly into these container formats.
+XMP_EMBED_FORMATS = frozenset({
+    "JPEG", "PNG", "WEBP", "TIFF", "GIF", "MP4", "MOV",
 })
+# exiftool refuses to write into matroska — payload goes into a `<file>.xmp`
+# sidecar instead.
+XMP_SIDECAR_FORMATS = frozenset({"MKV", "WEBM"})
+XMP_WRITABLE_FORMATS = XMP_EMBED_FORMATS | XMP_SIDECAR_FORMATS
+
+SIDECAR_EXTS = frozenset({".mkv", ".webm"})
+SIDECAR_SUFFIX = ".xmp"
+
+
+def xmp_target(media_path: Path) -> Path:
+    """Path that actually carries the XMP payload for this media file.
+
+    For embeddable containers the media file itself; for matroska-based
+    containers a sibling `<name>.xmp` file (so `foo.webm` → `foo.webm.xmp`).
+    """
+    if media_path.suffix.lower() in SIDECAR_EXTS:
+        return media_path.with_name(media_path.name + SIDECAR_SUFFIX)
+    return media_path
+
+
+def is_sidecar_format(media_path: Path) -> bool:
+    return media_path.suffix.lower() in SIDECAR_EXTS
 
 
 class MetadataError(RuntimeError):
@@ -80,7 +103,7 @@ def _build_write_args(image_path: Path, tagged: schema.TaggedImage) -> list[str]
     args.append(f"-XMP-vtag:Sha256={tagged.source.sha256}")
     args.append(f"-XMP-vtag:SchemaVersion={tagged.schema_version}")
     args.append(f"-XMP-vtag:Payload={_encode_payload(tagged)}")
-    args.append(str(image_path))
+    args.append(str(xmp_target(image_path)))
     return args
 
 
@@ -88,7 +111,7 @@ def _build_read_args(image_path: Path) -> list[str]:
     return [
         "-j", "-G1", "-s",
         "-XMP-vtag:Payload",
-        str(image_path),
+        str(xmp_target(image_path)),
     ]
 
 
@@ -283,6 +306,9 @@ def _run_oneshot(args: list[str], *, timeout: float) -> tuple[int, bytes, bytes]
 
 
 def _read_payload_field(image_path: Path) -> str | None:
+    target = xmp_target(image_path)
+    if not target.exists():
+        return None
     args = _build_read_args(image_path)
     daemon = _daemon()
     try:
