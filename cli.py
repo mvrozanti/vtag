@@ -73,6 +73,9 @@ async def cmd_tag(args: argparse.Namespace) -> int:
                 result.elapsed_seconds, images[0].name, _summary(result.tagged),
             )
             return 0
+        except preprocess.CorruptSourceError as exc:
+            log.warning("[1/1] SKIP %s (corrupt: %s)", images[0], exc)
+            return 0
         except Exception as exc:
             log.exception("[1/1] FAIL %s: %s", images[0], exc)
             return 1
@@ -88,6 +91,10 @@ async def cmd_tag(args: argparse.Namespace) -> int:
             ):
                 i += 1
                 if exc is not None:
+                    if isinstance(exc, preprocess.CorruptSourceError):
+                        skipped_n += 1
+                        log.warning("[%d/%d] SKIP %s (corrupt: %s)", i, total, path, exc)
+                        continue
                     failed_n += 1
                     log.error("[%d/%d] FAIL %s: %s", i, total, path, exc)
                     if args.fail_fast:

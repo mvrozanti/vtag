@@ -12,9 +12,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import av
-from PIL import Image, ImageSequence
+from PIL import Image, ImageSequence, UnidentifiedImageError
 
 log = logging.getLogger(__name__)
+
+
+class CorruptSourceError(Exception):
+    """Source file is unreadable (truncated, garbled, or wrong magic).
+
+    Distinct from generic Exception so callers can demote these to SKIP
+    rather than FAIL — re-running the pipeline won't fix a corrupt file.
+    """
 
 SUPPORTED_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "GIF", "BMP", "TIFF"})
 SUPPORTED_VIDEO_FORMATS = frozenset({"MP4", "MOV", "MKV", "WEBM"})
@@ -57,19 +65,22 @@ def is_video(path: Path) -> bool:
 
 
 def _probe_video(path: Path) -> tuple[str, int, int, int]:
-    with av.open(str(path)) as container:
-        stream = next((s for s in container.streams if s.type == "video"), None)
-        if stream is None:
-            raise ValueError(f"no video stream in {path}")
-        cc = stream.codec_context
-        width = int(cc.width or 0)
-        height = int(cc.height or 0)
-        frames = int(stream.frames or 0)
-        if frames <= 0 and stream.duration and stream.time_base and stream.average_rate:
-            duration_s = float(stream.duration * stream.time_base)
-            frames = max(1, int(duration_s * float(stream.average_rate)))
-        if frames <= 0:
-            frames = 1
+    try:
+        with av.open(str(path)) as container:
+            stream = next((s for s in container.streams if s.type == "video"), None)
+            if stream is None:
+                raise CorruptSourceError(f"no video stream in {path}")
+            cc = stream.codec_context
+            width = int(cc.width or 0)
+            height = int(cc.height or 0)
+            frames = int(stream.frames or 0)
+            if frames <= 0 and stream.duration and stream.time_base and stream.average_rate:
+                duration_s = float(stream.duration * stream.time_base)
+                frames = max(1, int(duration_s * float(stream.average_rate)))
+            if frames <= 0:
+                frames = 1
+    except (av.AVError, EOFError, OSError) as exc:
+        raise CorruptSourceError(f"av cannot open {path}: {exc}") from exc
     fmt = _VIDEO_EXT_TO_FORMAT.get(path.suffix.lower(), "VIDEO")
     return fmt, width, height, frames
 
@@ -80,10 +91,13 @@ def probe(path: Path) -> Probe:
     if is_video(path):
         fmt, width, height, frames = _probe_video(path)
     else:
-        with Image.open(path) as img:
-            fmt = (img.format or "").upper()
-            width, height = img.size
-            frames = getattr(img, "n_frames", 1) or 1
+        try:
+            with Image.open(path) as img:
+                fmt = (img.format or "").upper()
+                width, height = img.size
+                frames = getattr(img, "n_frames", 1) or 1
+        except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+            raise CorruptSourceError(f"PIL cannot open {path}: {exc}") from exc
     return Probe(
         sha256=digest,
         size_bytes=st.st_size,
@@ -96,41 +110,47 @@ def probe(path: Path) -> Probe:
 
 
 def _midpoint_video_frame(path: Path) -> Image.Image:
-    with av.open(str(path)) as container:
-        stream = next((s for s in container.streams if s.type == "video"), None)
-        if stream is None:
-            raise ValueError(f"no video stream in {path}")
-        stream.thread_type = "AUTO"
+    try:
+        with av.open(str(path)) as container:
+            stream = next((s for s in container.streams if s.type == "video"), None)
+            if stream is None:
+                raise CorruptSourceError(f"no video stream in {path}")
+            stream.thread_type = "AUTO"
 
-        seek_pts = 0
-        seekable = bool(stream.duration and stream.time_base)
-        if seekable:
-            seek_pts = int(stream.duration / 2)
-            try:
-                container.seek(seek_pts, stream=stream, any_frame=False)
-            except av.AVError:
-                seekable = False
+            seek_pts = 0
+            seekable = bool(stream.duration and stream.time_base)
+            if seekable:
+                seek_pts = int(stream.duration / 2)
+                try:
+                    container.seek(seek_pts, stream=stream, any_frame=False)
+                except av.AVError:
+                    seekable = False
 
-        chosen = None
-        for frame in container.decode(stream):
-            chosen = frame
-            if seekable and frame.pts is not None and frame.pts >= seek_pts:
-                break
-        if chosen is None:
-            raise ValueError(f"no decodable video frame in {path}")
-        return chosen.to_image()
+            chosen = None
+            for frame in container.decode(stream):
+                chosen = frame
+                if seekable and frame.pts is not None and frame.pts >= seek_pts:
+                    break
+            if chosen is None:
+                raise CorruptSourceError(f"no decodable video frame in {path}")
+            return chosen.to_image()
+    except (av.AVError, EOFError, OSError) as exc:
+        raise CorruptSourceError(f"av decode failed on {path}: {exc}") from exc
 
 
 def _midpoint_image(path: Path) -> Image.Image:
-    with Image.open(path) as img:
-        n = getattr(img, "n_frames", 1) or 1
-        target = max(0, n // 2)
-        if n > 1:
-            for i, frame in enumerate(ImageSequence.Iterator(img)):
-                if i == target:
-                    return frame.convert("RGB").copy()
+    try:
+        with Image.open(path) as img:
+            n = getattr(img, "n_frames", 1) or 1
+            target = max(0, n // 2)
+            if n > 1:
+                for i, frame in enumerate(ImageSequence.Iterator(img)):
+                    if i == target:
+                        return frame.convert("RGB").copy()
+                return img.convert("RGB").copy()
             return img.convert("RGB").copy()
-        return img.convert("RGB").copy()
+    except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+        raise CorruptSourceError(f"PIL decode failed on {path}: {exc}") from exc
 
 
 def load_representative_image(path: Path) -> Image.Image:
