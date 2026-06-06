@@ -1,5 +1,7 @@
 import { getJSON } from './api.js';
 
+const VIDEO_FORMATS = new Set(['MP4', 'MOV', 'MKV', 'WEBM', 'AVI']);
+
 const ARRAY_SECTIONS = [
   ['characters', 'characters'],
   ['cultural_refs', 'cultural refs'],
@@ -117,9 +119,21 @@ export function setupPanel({ ctx }) {
     );
     inner.appendChild(head);
 
-    const img = el('img', { cls: 'panel-thumb', attrs: { src: `/api/thumb?sha=${encodeURIComponent(source.sha256 || '')}`, alt: name, loading: 'lazy' } });
-    img.addEventListener('error', () => img.remove());
-    inner.appendChild(img);
+    const sha = source.sha256 || '';
+    const fmt = String(source.format || '').toUpperCase();
+    if (sha && VIDEO_FORMATS.has(fmt)) {
+      const v = el('video', { cls: 'panel-thumb', attrs: {
+        controls: '',
+        preload: 'metadata',
+        src: `/api/raw?sha=${encodeURIComponent(sha)}`,
+        poster: `/api/thumb?sha=${encodeURIComponent(sha)}`,
+      } });
+      inner.appendChild(v);
+    } else {
+      const img = el('img', { cls: 'panel-thumb', attrs: { src: `/api/thumb?sha=${encodeURIComponent(sha)}`, alt: name, loading: 'lazy' } });
+      img.addEventListener('error', () => img.remove());
+      inner.appendChild(img);
+    }
 
     const typeBadges = badgeRow([
       ['type', payload.content_type],

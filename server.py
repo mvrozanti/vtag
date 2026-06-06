@@ -525,6 +525,82 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._bytes(HTTPStatus.OK, data, "image/jpeg", cache="public, max-age=86400")
 
+    def _serve_raw(self, sha: str) -> None:
+        sha = (sha or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{16,64}", sha):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid sha"})
+            return
+        conn = webui_cache.open_ro()
+        if conn is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
+            return
+        try:
+            hit = webui_cache.by_sha(conn, sha)
+        finally:
+            conn.close()
+        if hit is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
+            return
+        source_path, _payload = hit
+        p = Path(source_path)
+        try:
+            size = p.stat().st_size
+        except OSError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": f"file missing: {exc}"})
+            return
+        ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+        if p.suffix.lower() == ".mkv":
+            ctype = "video/x-matroska"
+        range_hdr = self.headers.get("Range")
+        start, end = 0, size - 1
+        status = HTTPStatus.OK
+        if range_hdr:
+            m = re.fullmatch(r"bytes=(\d*)-(\d*)", range_hdr.strip())
+            if not m or (m.group(1) == "" and m.group(2) == ""):
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("content-range", f"bytes */{size}")
+                self.end_headers()
+                return
+            s, e = m.group(1), m.group(2)
+            if s == "":
+                n = int(e)
+                start = max(0, size - n)
+                end = size - 1
+            else:
+                start = int(s)
+                end = int(e) if e else size - 1
+                end = min(end, size - 1)
+            if start > end or start >= size:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("content-range", f"bytes */{size}")
+                self.end_headers()
+                return
+            status = HTTPStatus.PARTIAL_CONTENT
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("content-type", ctype)
+        self.send_header("content-length", str(length))
+        self.send_header("accept-ranges", "bytes")
+        self.send_header("cache-control", "private, max-age=3600")
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("content-range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with open(p, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    buf = f.read(min(65536, remaining))
+                    if not buf:
+                        break
+                    self.wfile.write(buf)
+                    remaining -= len(buf)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except OSError as exc:
+            log.warning("raw read error: %s", exc)
+            return
+
     def _serve_recent(self, qs: dict[str, list[str]]) -> None:
         try:
             limit = max(1, min(200, int(qs.get("limit", ["60"])[0])))
@@ -617,6 +693,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/thumb":
             self._serve_thumb(qs.get("sha", [""])[0])
+            return
+        if path == "/api/raw":
+            self._serve_raw(qs.get("sha", [""])[0])
             return
         if path == "/api/events":
             self._serve_events(qs)
