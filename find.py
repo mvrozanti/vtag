@@ -33,6 +33,9 @@ EXIFTOOL_CONFIG = Path(__file__).resolve().parent / "pipeline" / "exiftool_confi
 def _xmp_target(media_path: str) -> str:
     if os.path.splitext(media_path)[1].lower() in SIDECAR_EXTS:
         return media_path + SIDECAR_SUFFIX
+    sidecar = media_path + SIDECAR_SUFFIX
+    if os.path.exists(sidecar):
+        return sidecar
     return media_path
 
 

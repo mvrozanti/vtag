@@ -39,12 +39,21 @@ SIDECAR_SUFFIX = ".xmp"
 def xmp_target(media_path: Path) -> Path:
     """Path that actually carries the XMP payload for this media file.
 
-    For embeddable containers the media file itself; for matroska-based
-    containers a sibling `<name>.xmp` file (so `foo.webm` → `foo.webm.xmp`).
+    Matroska always uses a `<name>.xmp` sidecar. For embeddable containers
+    the file itself, unless a sibling sidecar already exists — which happens
+    when MP4/MOV embedded writes fail (e.g. fragmented `sidx`) and fall back
+    to a sidecar. Once a sidecar exists, it wins on read and on rewrite.
     """
     if media_path.suffix.lower() in SIDECAR_EXTS:
         return media_path.with_name(media_path.name + SIDECAR_SUFFIX)
+    sidecar = media_path.with_name(media_path.name + SIDECAR_SUFFIX)
+    if sidecar.exists():
+        return sidecar
     return media_path
+
+
+def _sidecar_path(media_path: Path) -> Path:
+    return media_path.with_name(media_path.name + SIDECAR_SUFFIX)
 
 
 def is_sidecar_format(media_path: Path) -> bool:
@@ -75,7 +84,12 @@ def _decode_payload(b64: str) -> schema.TaggedImage:
     return schema.TaggedImage(source=src, model=mdl, **data)
 
 
-def _build_write_args(image_path: Path, tagged: schema.TaggedImage) -> list[str]:
+def _build_write_args(
+    image_path: Path,
+    tagged: schema.TaggedImage,
+    *,
+    target_override: Path | None = None,
+) -> list[str]:
     description = tagged.description or ""
     title_bits = [tagged.content_type]
     if tagged.template:
@@ -86,6 +100,7 @@ def _build_write_args(image_path: Path, tagged: schema.TaggedImage) -> list[str]
 
     args: list[str] = [
         "-overwrite_original",
+        "-m",
         "-q", "-q",
         "-codedcharacterset=utf8",
         "-XMP-dc:Subject=",
@@ -103,7 +118,8 @@ def _build_write_args(image_path: Path, tagged: schema.TaggedImage) -> list[str]
     args.append(f"-XMP-vtag:Sha256={tagged.source.sha256}")
     args.append(f"-XMP-vtag:SchemaVersion={tagged.schema_version}")
     args.append(f"-XMP-vtag:Payload={_encode_payload(tagged)}")
-    args.append(str(xmp_target(image_path)))
+    target = target_override if target_override is not None else xmp_target(image_path)
+    args.append(str(target))
     return args
 
 
@@ -364,16 +380,14 @@ def already_tagged(image_path: Path, sha256: str | None = None) -> schema.Tagged
     return existing
 
 
-def write(image_path: Path, tagged: schema.TaggedImage) -> None:
-    fmt = tagged.source.format.upper()
-    if fmt not in XMP_WRITABLE_FORMATS:
-        raise MetadataError(f"XMP not writable for format {fmt!r} ({image_path})")
+MP4_LIKE_FORMATS = frozenset({"MP4", "MOV"})
 
-    args = _build_write_args(image_path, tagged)
+
+def _do_write(image_path: Path, tagged: schema.TaggedImage, target_override: Path | None) -> None:
+    args = _build_write_args(image_path, tagged, target_override=target_override)
     daemon = _daemon()
     if daemon is not None:
         _stdout, stderr_text = daemon.execute(args, timeout=60)
-        # -q -q silences info + warnings; any stderr text is a real error.
         if stderr_text.strip():
             raise MetadataError(
                 f"exiftool write failed on {image_path}: {stderr_text.strip()[:400]}"
@@ -384,3 +398,25 @@ def write(image_path: Path, tagged: schema.TaggedImage) -> None:
         raise MetadataError(
             f"exiftool write failed on {image_path}: {stderr.decode(errors='replace')}"
         )
+
+
+def write(image_path: Path, tagged: schema.TaggedImage) -> None:
+    fmt = tagged.source.format.upper()
+    if fmt not in XMP_WRITABLE_FORMATS:
+        raise MetadataError(f"XMP not writable for format {fmt!r} ({image_path})")
+
+    try:
+        _do_write(image_path, tagged, target_override=None)
+    except MetadataError as exc:
+        # MP4/MOV write can fail when exiftool refuses to rewrite the
+        # container (fragmented MP4 with sidx, etc.) — fall back to a
+        # `<file>.xmp` sidecar so the payload still lives on disk.
+        if fmt in MP4_LIKE_FORMATS:
+            sidecar = _sidecar_path(image_path)
+            log.warning(
+                "embedded write failed on %s, retrying as sidecar %s: %s",
+                image_path, sidecar.name, str(exc)[:200],
+            )
+            _do_write(image_path, tagged, target_override=sidecar)
+            return
+        raise
