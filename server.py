@@ -400,21 +400,37 @@ def _reindex_start() -> tuple[int, dict]:
         return HTTPStatus.CONFLICT, {"error": "reindex already running", **status}
     if not FIND_SCRIPT.exists():
         return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"find.py not found at {FIND_SCRIPT}"}
+    env = os.environ.copy()
+    roots = env.get("VTAG_SEARCH_ROOTS")
+    if not roots and TARGET_DIR:
+        env["VTAG_SEARCH_ROOTS"] = str(TARGET_DIR)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    log_path = LOG_DIR / f"reindex-{stamp}.log"
+    try:
+        fh = open(log_path, "wb")
+    except OSError as exc:
+        return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"log open failed: {exc}"}
     try:
         proc = subprocess.Popen(
-            [sys.executable, str(FIND_SCRIPT), "--json"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            [sys.executable, str(FIND_SCRIPT), "--reindex", "--json", "--log-level", "INFO"],
+            stdout=fh,
+            stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
+            env=env,
         )
     except OSError as exc:
+        fh.close()
         return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"spawn failed: {exc}"}
+    finally:
+        fh.close()
     with _reindex_lock:
         _reindex_state["pid"] = proc.pid
         _reindex_state["started_at"] = _now_iso()
-    return HTTPStatus.ACCEPTED, {"started": True, "pid": proc.pid}
+        _reindex_state["log"] = str(log_path)
+    return HTTPStatus.ACCEPTED, {"started": True, "pid": proc.pid, "log": str(log_path)}
 
 
 class Handler(BaseHTTPRequestHandler):
