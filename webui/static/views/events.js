@@ -102,7 +102,7 @@ export async function render(container, { ctx }) {
   }
   toolbar.appendChild(tabs);
   toolbar.appendChild(el('span', { cls: 'grow' }));
-  toolbar.appendChild(el('span', { cls: 'label', id: 'event-meta', text: 'loading…' }));
+  toolbar.appendChild(el('span', { cls: 'label', attrs: { id: 'event-meta' }, text: 'loading…' }));
   const refreshBtn = el('button', { text: 'refresh' });
   refreshBtn.addEventListener('click', () => renderList(container, ctx));
   toolbar.appendChild(refreshBtn);
