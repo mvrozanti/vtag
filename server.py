@@ -625,6 +625,31 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         self._json(HTTPStatus.OK, {"cache_available": True, "items": items, "meta": meta})
 
+    def _serve_search(self, qs: dict[str, list[str]]) -> None:
+        try:
+            limit = max(1, min(1000, int(qs.get("limit", ["300"])[0])))
+        except ValueError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "limit must be int"})
+            return
+        query = qs.get("q", [""])[0] or ""
+        content_type = qs.get("type", [None])[0]
+        conn = webui_cache.open_ro()
+        if conn is None:
+            self._json(HTTPStatus.OK, {"cache_available": False, "items": [], "total": 0})
+            return
+        try:
+            items, total = webui_cache.search(
+                conn, query=query, content_type=content_type, limit=limit,
+            )
+        finally:
+            conn.close()
+        self._json(HTTPStatus.OK, {
+            "cache_available": True,
+            "items": items,
+            "total": total,
+            "returned": len(items),
+        })
+
     def _serve_item(self, qs: dict[str, list[str]]) -> None:
         sha = (qs.get("sha", [""])[0] or "").lower()
         if not re.fullmatch(r"[0-9a-f]{16,64}", sha):
@@ -692,6 +717,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/recent":
             self._serve_recent(qs)
+            return
+        if path == "/api/search":
+            self._serve_search(qs)
             return
         if path == "/api/item":
             self._serve_item(qs)

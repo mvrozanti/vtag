@@ -1,7 +1,8 @@
 import { getJSON } from '../api.js';
 
-const POOL_LIMIT = 800;
-let state = null;
+const RESULT_LIMIT = 300;
+const DEBOUNCE_MS = 180;
+let timer = null;
 
 function el(tag, opts = {}, ...children) {
   const e = document.createElement(tag);
@@ -57,34 +58,40 @@ function cardEl(item, ctx) {
   return card;
 }
 
-function matches(item, query, contentType) {
-  if (contentType && item.content_type !== contentType) return false;
-  if (!query) return true;
-  const needle = query.toLowerCase();
-  if (item.basename && item.basename.toLowerCase().includes(needle)) return true;
-  if (item.tags_top) {
-    for (const t of item.tags_top) if (String(t).toLowerCase().includes(needle)) return true;
-  }
-  return false;
-}
-
-function renderResults(grid, status, items, query, contentType, ctx) {
+async function runSearch(grid, status, query, contentType, ctx) {
+  status.textContent = 'searching…';
+  const params = new URLSearchParams();
+  if (query) params.set('q', query);
+  if (contentType) params.set('type', contentType);
+  params.set('limit', String(RESULT_LIMIT));
+  const r = await getJSON('/api/search?' + params.toString());
+  const body = r.body || {};
   grid.innerHTML = '';
-  const filtered = items.filter(it => matches(it, query, contentType));
-  status.textContent = `${filtered.length.toLocaleString()} / ${items.length.toLocaleString()} match`;
-  for (const item of filtered.slice(0, 300)) {
-    grid.appendChild(cardEl(item, ctx));
+  if (!body.cache_available) {
+    status.textContent = '0 match';
+    const e = el('div', { cls: 'empty' });
+    e.appendChild(el('h2', { text: 'no cache' }));
+    e.appendChild(el('p', { text: 'Reindex first — feed view has the button.' }));
+    grid.appendChild(e);
+    return;
   }
-  if (filtered.length > 300) {
+  const items = body.items || [];
+  const total = body.total || 0;
+  status.textContent = `${total.toLocaleString()} match${total === 1 ? '' : 'es'}`;
+  for (const item of items) grid.appendChild(cardEl(item, ctx));
+  if (total > items.length) {
     const more = el('div', { cls: 'empty' });
-    more.appendChild(el('p', { text: `+${filtered.length - 300} more — narrow the query to see them.` }));
+    more.appendChild(el('p', { text: `showing ${items.length} of ${total.toLocaleString()} — narrow the query to see the rest.` }));
     grid.appendChild(more);
+  } else if (total === 0) {
+    const none = el('div', { cls: 'empty' });
+    none.appendChild(el('p', { text: 'no matches' }));
+    grid.appendChild(none);
   }
 }
 
 export async function render(container, { ctx }) {
   container.innerHTML = '';
-  state = { items: [] };
 
   const toolbar = el('div', { cls: 'view-toolbar' });
   const initial = sessionStorage.getItem('vtag.search.q') || '';
@@ -109,23 +116,14 @@ export async function render(container, { ctx }) {
   const grid = el('div', { cls: 'card-grid' });
   container.appendChild(grid);
 
-  const r = await getJSON(`/api/recent?limit=${POOL_LIMIT}`);
-  state.items = (r.body && r.body.items) || [];
-  if (!r.body || !r.body.cache_available) {
-    const e = el('div', { cls: 'empty' });
-    e.appendChild(el('h2', { text: 'no cache' }));
-    e.appendChild(el('p', { text: 'Reindex first — feed view has the button.' }));
-    container.appendChild(e);
-    status.textContent = '0 / 0';
-    return;
+  const query = () => runSearch(grid, status, input.value.trim(), select.value, ctx);
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(query, DEBOUNCE_MS);
   }
-
-  function refresh() {
-    renderResults(grid, status, state.items, input.value.trim(), select.value, ctx);
-  }
-  input.addEventListener('input', refresh);
-  select.addEventListener('change', refresh);
-  refresh();
+  input.addEventListener('input', schedule);
+  select.addEventListener('change', query);
+  await query();
 
   if (fromTag && !document.activeElement?.tagName?.match(/INPUT|SELECT/)) {
     // tag click came from panel: leave focus where it was so user keeps reading
@@ -135,4 +133,4 @@ export async function render(container, { ctx }) {
   }
 }
 
-export function teardown() { state = null; }
+export function teardown() { clearTimeout(timer); timer = null; }

@@ -95,6 +95,59 @@ def recent(
     return out
 
 
+def _payload_matches(path: str, payload: dict, needle: str) -> bool:
+    if needle in os.path.basename(path).lower():
+        return True
+    for t in payload.get("tags") or []:
+        if needle in str(t).lower():
+            return True
+    for c in payload.get("characters") or []:
+        if needle in str(c).lower():
+            return True
+    if needle in str(payload.get("template") or "").lower():
+        return True
+    if needle in str(payload.get("content_type") or "").lower():
+        return True
+    for line in payload.get("text_ocr") or []:
+        if needle in str(line).lower():
+            return True
+    for field in ("description", "context", "punchline"):
+        if needle in str(payload.get(field) or "").lower():
+            return True
+    return False
+
+
+def search(
+    conn: sqlite3.Connection,
+    *,
+    query: str | None = None,
+    content_type: str | None = None,
+    limit: int = 300,
+) -> tuple[list[dict[str, Any]], int]:
+    """Filter the whole cache by free substring + content_type. Returns
+    (cards up to `limit`, total match count). Matches basename, tags,
+    characters, template, content_type, OCR text, and the prose fields.
+    """
+    needle = (query or "").strip().lower()
+    ctype = (content_type or "").strip().lower() or None
+    items: list[dict[str, Any]] = []
+    total = 0
+    for row in conn.execute(
+        "SELECT path, mtime, payload FROM images WHERE payload IS NOT NULL ORDER BY mtime DESC"
+    ):
+        payload = decode_payload(row["payload"])
+        if payload is None:
+            continue
+        if ctype and str(payload.get("content_type") or "").lower() != ctype:
+            continue
+        if needle and not _payload_matches(row["path"], payload, needle):
+            continue
+        total += 1
+        if len(items) < limit:
+            items.append(_card(row["path"], int(row["mtime"]), payload))
+    return items, total
+
+
 def by_sha(conn: sqlite3.Connection, sha256: str) -> tuple[str, dict] | None:
     if not sha256:
         return None
