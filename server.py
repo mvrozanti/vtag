@@ -304,11 +304,14 @@ def _status() -> dict:
     }
 
 
-def _start() -> tuple[int, dict]:
-    if not TARGET_DIR or not TARGET_DIR.exists():
+def _start(target: Path | None = None) -> tuple[int, dict]:
+    target = target or TARGET_DIR
+    if not target or not target.exists():
         return HTTPStatus.BAD_REQUEST, {
-            "error": f"VTAG_HUB_TARGET_DIR not set or does not exist: {TARGET_DIR!s}"
+            "error": f"target not set or does not exist: {target!s}"
         }
+    if not target.is_dir():
+        return HTTPStatus.BAD_REQUEST, {"error": f"target is not a directory: {target!s}"}
     state = _read_state()
     if state.get("pid") and _pid_alive(int(state["pid"])):
         return HTTPStatus.CONFLICT, {"error": "run already active", "pid": state["pid"]}
@@ -319,7 +322,7 @@ def _start() -> tuple[int, dict]:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = LOG_DIR / f"run-{stamp}.log"
 
-    cmd = [VTAG_BIN, "tag", "-r", str(TARGET_DIR)]
+    cmd = [VTAG_BIN, "tag", "-r", str(target)]
     fh = log_path.open("w")
     proc = subprocess.Popen(
         cmd,
@@ -334,7 +337,7 @@ def _start() -> tuple[int, dict]:
         "pgid": proc.pid,
         "log": str(log_path),
         "cmd": cmd,
-        "target_dir": str(TARGET_DIR),
+        "target_dir": str(target),
         "started_at": _now_iso(),
         "stopped_at": None,
     }
@@ -705,11 +708,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+    def _read_json_body(self) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            return {}
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         path = parsed.path
         if path == "/api/start":
-            code, body = _start()
+            body_in = self._read_json_body()
+            target_raw = body_in.get("target")
+            target = Path(target_raw).expanduser() if target_raw else None
+            code, body = _start(target)
             self._json(code, body)
             return
         if path == "/api/stop":

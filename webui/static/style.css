@@ -219,6 +219,12 @@ main { position: relative; z-index: 1; padding: 1.5rem; max-width: 1400px; margi
   box-shadow: 0 0 6px rgba(0,255,102,0.35); transition: width .4s ease-out;
 }
 .runner-controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.runner-target {
+  flex: 1 1 18rem; min-width: 12rem;
+  background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+  padding: 0 0.6rem; border-radius: 4px; font: inherit; font-size: 0.82rem;
+}
+.runner-target:disabled { opacity: 0.5; }
 .log-pre {
   background: var(--bg); border: 1px solid var(--line); padding: 0.7rem;
   font-size: 0.72rem; line-height: 1.4; overflow: auto;

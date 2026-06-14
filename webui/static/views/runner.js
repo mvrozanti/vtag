@@ -37,11 +37,17 @@ export async function render(container, { ctx }) {
   container.innerHTML = '';
 
   const controls = el('div', { cls: 'runner-controls' });
+  const targetInput = el('input', {
+    cls: 'runner-target',
+    attrs: { type: 'text', placeholder: 'target dir (blank = default)', spellcheck: 'false' },
+  });
   const btnStart = el('button', { cls: 'primary', text: 'start run' });
   const btnStop = el('button', { cls: 'danger', text: 'stop run', attrs: { disabled: '' } });
   const btnRefresh = el('button', { text: 'refresh' });
-  controls.append(btnStart, btnStop, btnRefresh);
+  controls.append(targetInput, btnStart, btnStop, btnRefresh);
   container.appendChild(controls);
+  let targetDirty = false;
+  targetInput.addEventListener('input', () => { targetDirty = true; });
 
   const grid = el('div', { cls: 'runner-grid' });
 
@@ -80,6 +86,10 @@ export async function render(container, { ctx }) {
     document.getElementById('r-state').textContent = running ? 'running' : 'idle';
     btnStart.disabled = running;
     btnStop.disabled = !running;
+    targetInput.disabled = running;
+    if (!targetDirty && document.activeElement !== targetInput) {
+      targetInput.value = st.target_dir && st.target_dir !== '(unset)' ? st.target_dir : '';
+    }
 
     const p = st.progress || {};
     const tagged = st.tagged_count || 0;
@@ -118,8 +128,10 @@ export async function render(container, { ctx }) {
 
   btnStart.addEventListener('click', async () => {
     btnStart.disabled = true;
-    const r = await postJSON('/api/start');
+    const target = targetInput.value.trim();
+    const r = await postJSON('/api/start', target ? { target } : {});
     if (!r.ok) ctx.toast(r.body?.error || 'start failed');
+    targetDirty = false;
     refresh();
   });
   btnStop.addEventListener('click', async () => {

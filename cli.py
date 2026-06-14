@@ -10,9 +10,38 @@ from dataclasses import asdict
 from pathlib import Path
 
 import config
+import runstate
 from pipeline import dispatcher, metadata, preprocess, schema
 
 log = logging.getLogger("vtag")
+
+_FILE_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+
+def _run_cmd(args: argparse.Namespace, root: Path) -> list[str]:
+    cmd = ["vtag", "tag"]
+    if args.recursive:
+        cmd.append("-r")
+    if args.force:
+        cmd.append("-f")
+    cmd.append(str(root))
+    return cmd
+
+
+def _attach_file_log(log_path: Path | None) -> logging.Handler | None:
+    if log_path is None:
+        return None
+    handler = logging.FileHandler(log_path)
+    handler.setFormatter(logging.Formatter(_FILE_LOG_FORMAT))
+    logging.getLogger("vtag").addHandler(handler)
+    return handler
+
+
+def _detach_file_log(handler: logging.Handler | None) -> None:
+    if handler is None:
+        return
+    logging.getLogger("vtag").removeHandler(handler)
+    handler.close()
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif",
               ".mp4", ".mov", ".mkv", ".webm"}
@@ -80,46 +109,54 @@ async def cmd_tag(args: argparse.Namespace) -> int:
             log.exception("[1/1] FAIL %s: %s", images[0], exc)
             return 1
 
-    if config.EXIFTOOL_DAEMON:
-        metadata.start_daemon()
+    log_path = runstate.begin(_run_cmd(args, root), str(root))
+    if log_path is None:
+        log.warning("another vtag run owns run-state; this run won't appear in the webui")
+    file_handler = _attach_file_log(log_path)
 
     try:
-        for chunk_start in range(0, total, config.BATCH_SIZE):
-            chunk = images[chunk_start : chunk_start + config.BATCH_SIZE]
-            async for path, result, exc in dispatcher.tag_batch(
-                chunk, force=args.force, on_busy=_busy_handler,
-            ):
-                i += 1
-                if exc is not None:
-                    if isinstance(exc, preprocess.CorruptSourceError):
-                        skipped_n += 1
-                        log.warning("[%d/%d] SKIP %s (corrupt: %s)", i, total, path, exc)
-                        continue
-                    failed_n += 1
-                    log.error("[%d/%d] FAIL %s: %s", i, total, path, exc)
-                    if args.fail_fast:
-                        return 1
-                    continue
-                assert result is not None
-                if result.cached:
-                    skipped_n += 1
-                    log.info("[%d/%d] SKIP %s (already tagged)", i, total, path)
-                else:
-                    tagged_n += 1
-                    log.info(
-                        "[%d/%d] OK %.1fs %s -- %s",
-                        i, total, result.elapsed_seconds, path.name,
-                        _summary(result.tagged),
-                    )
-    finally:
         if config.EXIFTOOL_DAEMON:
-            metadata.stop_daemon()
+            metadata.start_daemon()
+        try:
+            for chunk_start in range(0, total, config.BATCH_SIZE):
+                chunk = images[chunk_start : chunk_start + config.BATCH_SIZE]
+                async for path, result, exc in dispatcher.tag_batch(
+                    chunk, force=args.force, on_busy=_busy_handler,
+                ):
+                    i += 1
+                    if exc is not None:
+                        if isinstance(exc, preprocess.CorruptSourceError):
+                            skipped_n += 1
+                            log.warning("[%d/%d] SKIP %s (corrupt: %s)", i, total, path, exc)
+                            continue
+                        failed_n += 1
+                        log.error("[%d/%d] FAIL %s: %s", i, total, path, exc)
+                        if args.fail_fast:
+                            return 1
+                        continue
+                    assert result is not None
+                    if result.cached:
+                        skipped_n += 1
+                        log.info("[%d/%d] SKIP %s (already tagged)", i, total, path)
+                    else:
+                        tagged_n += 1
+                        log.info(
+                            "[%d/%d] OK %.1fs %s -- %s",
+                            i, total, result.elapsed_seconds, path.name,
+                            _summary(result.tagged),
+                        )
+        finally:
+            if config.EXIFTOOL_DAEMON:
+                metadata.stop_daemon()
 
-    log.info(
-        "done: %d tagged, %d skipped, %d failed (total %d)",
-        tagged_n, skipped_n, failed_n, total,
-    )
-    return 0 if failed_n == 0 else 1
+        log.info(
+            "done: %d tagged, %d skipped, %d failed (total %d)",
+            tagged_n, skipped_n, failed_n, total,
+        )
+        return 0 if failed_n == 0 else 1
+    finally:
+        _detach_file_log(file_handler)
+        runstate.finish(log_path)
 
 
 def _summary(tagged) -> str:
