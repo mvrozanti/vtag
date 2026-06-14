@@ -286,10 +286,12 @@ def _status() -> dict:
 
     untagged = max(0, total_now - tagged_now) if tagged_now is not None else 0
 
+    active_target = state.get("target_dir") if running else None
+
     return {
         "running": running,
         "pid": pid if running else None,
-        "target_dir": str(TARGET_DIR) if TARGET_DIR else None,
+        "target_dir": active_target or (str(TARGET_DIR) if TARGET_DIR else None),
         "log": str(log_file) if log_file else None,
         "started_at": state.get("started_at"),
         "stopped_at": None if running else state.get("stopped_at"),
