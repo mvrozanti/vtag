@@ -296,6 +296,23 @@ def cmd_label(args: argparse.Namespace) -> int:
     return 0
 
 
+CHARACTER_VOCAB = frozenset({
+    "pepe", "apu", "apustaja", "wojak", "doomer", "soyjak", "soyboy",
+    "coomer", "groyper", "brainlet", "npc", "chad", "gigachad", "virgin",
+    "stacy", "becky", "trad", "soyak", "soijak",
+})
+
+
+def _is_character_tag(tag: str) -> bool:
+    # char:* meta-tags are always character-derived; for the rest, a tag is a
+    # character tag if any underscore/colon token matches the vocabulary
+    # (catches `apustaja`, `apustaja_adjacent`, `apustaja_feet_focus_meme`).
+    if tag.startswith("char:"):
+        return True
+    tokens = tag.replace(":", "_").split("_")
+    return any(tok in CHARACTER_VOCAB for tok in tokens)
+
+
 def cmd_drop_characters(args: argparse.Namespace) -> int:
     root = Path(args.path).expanduser().resolve()
     if not root.exists():
@@ -312,34 +329,29 @@ def cmd_drop_characters(args: argparse.Namespace) -> int:
         metadata.start_daemon()
     try:
         for i, img in enumerate(images, 1):
-            raw = metadata.read_raw_payload(img)
-            chars = (raw or {}).get("characters") or []
-            if not chars:
-                skipped += 1
-                continue
-            derived: set[str] = set()
-            for ch in chars:
-                n = schema.normalize_tag(ch)
-                if n:
-                    derived.add(n)
-                    derived.add(f"char:{n}")
             tagged = metadata.read(img)
             if tagged is None:
                 skipped += 1
                 continue
-            before = len(tagged.tags)
-            tagged.tags = [t for t in tagged.tags if t not in derived]
+            kept_tags = [t for t in tagged.tags if not _is_character_tag(t)]
+            kept_refs = [r for r in tagged.cultural_refs
+                         if not any(tok in CHARACTER_VOCAB for tok in r.replace(":", "_").split("_"))]
+            removed = (len(tagged.tags) - len(kept_tags)) + (len(tagged.cultural_refs) - len(kept_refs))
+            if removed == 0:
+                skipped += 1
+                continue
+            tagged.tags = kept_tags
+            tagged.cultural_refs = kept_refs
             if args.dry_run:
                 cleaned += 1
-                log.info("[%d/%d] would clean %s (drop %d char tags)",
-                         i, total, img.name, before - len(tagged.tags))
+                log.info("[%d/%d] would clean %s (drop %d character tags)",
+                         i, total, img.name, removed)
                 continue
             try:
                 metadata.write(img, tagged)
                 cleaned += 1
                 if args.verbose:
-                    log.info("[%d/%d] cleaned %s (-%d tags)",
-                             i, total, img.name, before - len(tagged.tags))
+                    log.info("[%d/%d] cleaned %s (-%d)", i, total, img.name, removed)
             except metadata.MetadataError as exc:
                 failed += 1
                 log.warning("[%d/%d] write failed %s: %s", i, total, img, exc)

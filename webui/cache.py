@@ -100,13 +100,18 @@ def recent(
 
 def _haystack(path: str, payload: dict) -> str:
     parts: list[str] = [os.path.basename(path)]
-    parts += [str(t) for t in (payload.get("tags") or [])]
+    # Skip colon-prefixed meta-tags (char:/ref:/tpl:/color:/ocr:). They are
+    # structured, not free text, and each has a bare counterpart or a dedicated
+    # field already in the haystack — so a free-text search for "apustaja" must
+    # not match a stray ref:apustaja meta-tag.
+    parts += [str(t) for t in (payload.get("tags") or []) if ":" not in str(t)]
     parts += [str(t) for t in (payload.get("user_labels") or [])]
     parts.append(str(payload.get("template") or ""))
     parts.append(str(payload.get("content_type") or ""))
     parts += [str(t) for t in (payload.get("text_ocr") or [])]
-    for field in ("description", "context", "punchline"):
-        parts.append(str(payload.get(field) or ""))
+    # Deliberately excludes the model's prose (description/context/punchline):
+    # free-text search targets discrete tokens (tags, labels, OCR, filename),
+    # not narrative text, which otherwise resurfaces tag-style hallucinations.
     return " ".join(parts).lower()
 
 
