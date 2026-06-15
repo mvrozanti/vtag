@@ -130,8 +130,16 @@ export function setupPanel({ ctx }) {
       } });
       inner.appendChild(v);
     } else {
-      const img = el('img', { cls: 'panel-thumb', attrs: { src: `/api/thumb?sha=${encodeURIComponent(sha)}`, alt: name, loading: 'lazy' } });
+      // Show the cached thumb instantly, then upgrade to the full-resolution
+      // original once it has downloaded so the preview is faithful.
+      const rawUrl = `/api/raw?sha=${encodeURIComponent(sha)}`;
+      const img = el('img', { cls: 'panel-thumb', attrs: { src: `/api/thumb?sha=${encodeURIComponent(sha)}`, alt: name, title: 'click to open full resolution' } });
+      img.style.cursor = 'zoom-in';
       img.addEventListener('error', () => img.remove());
+      img.addEventListener('click', () => window.open(rawUrl, '_blank', 'noopener'));
+      const full = new Image();
+      full.onload = () => { img.src = rawUrl; };
+      full.src = rawUrl;
       inner.appendChild(img);
     }
 
