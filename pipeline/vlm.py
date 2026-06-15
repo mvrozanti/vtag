@@ -8,14 +8,14 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 
 PROMPT_TEMPLATE = """You are an image-tagging assistant. Be specific and dense — aim for 40-60 distinct tags per image. Produce ONLY a JSON object, no prose. Respect the size caps in each field. Empty arrays/strings where a field doesn't apply:
 
 {{
   "content_type": "meme|photo|screenshot_text|screenshot_app|graph_chart|diagram|art|other",
   "template": "<meme template name (drake, distracted_boyfriend, two_buttons, ...) or empty>",
-  "characters": ["<canonical names: pepe, apu, apustaja, wojak, doomer, soyjak, chad, gigachad, drake, spongebob, shrek, ... up to 8>"],
+  "characters": ["<canonical names ONLY if a meme/cartoon character is unmistakably present: pepe, apu, apustaja, wojak, doomer, soyjak, chad, gigachad, drake, spongebob, shrek, ...; up to 8. Leave EMPTY for ordinary photos, screenshots, and pictures of real people or animals.>"],
   "text_visible": ["<key text blocks verbatim, up to 12 items; for walls of text take only the most distinctive lines, not exhaustive>"],
   "visual_elements": ["<15-25 items. Body parts (face, hair, hands), every visible clothing item, every prop, every piece of furniture, plants, signs, background elements. Lowercase_underscore.>"],
   "actions": ["<verbs of what's happening; 0-8 items: pointing, crying, drinking, sleeping, holding_phone>"],
@@ -35,7 +35,7 @@ PROMPT_TEMPLATE = """You are an image-tagging assistant. Be specific and dense �
 Rules:
 - Total tag array entries across all fields should land around 50 per image. Respect per-field caps.
 - For walls of text (poems, equations, paragraphs), text_visible holds only the most distinctive 8-12 lines. Do not transcribe entire passages.
-- Name recurring meme characters by canonical names. If unsure but it looks like a known meme character, use your best guess.
+- Name recurring meme characters by canonical names ONLY when you can clearly identify them. If you are unsure, leave them out — an empty characters list is correct and expected. NEVER assign a meme character (pepe, apu, apustaja, wojak, etc.) to an ordinary photo, screenshot, or a picture of a real person or animal; those keep an empty characters list. A real cat is not apustaja; a real person is not a wojak.
 - For photos/screenshots/graphs, set template="" and punchline="" but still fill visual_elements/colors/composition/style/setting.
 - All tag values lowercase, underscore_separated, no spaces or punctuation inside tags.
 - Output strictly valid JSON. No code fences. No commentary outside the JSON object.

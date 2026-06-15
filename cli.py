@@ -18,13 +18,16 @@ log = logging.getLogger("vtag")
 _FILE_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 
-def _run_cmd(args: argparse.Namespace, root: Path) -> list[str]:
+def _run_cmd(args: argparse.Namespace, label: str) -> list[str]:
     cmd = ["vtag", "tag"]
     if args.recursive:
         cmd.append("-r")
     if args.force:
         cmd.append("-f")
-    cmd.append(str(root))
+    if args.from_file:
+        cmd += ["--from-file", label]
+    else:
+        cmd.append(label)
     return cmd
 
 
@@ -70,15 +73,38 @@ async def _busy_handler(busy):
 
 
 async def cmd_tag(args: argparse.Namespace) -> int:
-    root = Path(args.path).expanduser().resolve()
-    if not root.exists():
-        log.error("path does not exist: %s", root)
-        return 2
-
-    images = _iter_images(root, recursive=args.recursive)
-    if not images:
-        log.warning("no images found under %s", root)
-        return 0
+    if args.from_file:
+        list_path = Path(args.from_file).expanduser()
+        if not list_path.exists():
+            log.error("list file does not exist: %s", list_path)
+            return 2
+        images = []
+        for line in list_path.read_text().splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            p = Path(s).expanduser()
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+                images.append(p)
+        if not images:
+            log.warning("no taggable images listed in %s", list_path)
+            return 0
+        run_label = str(list_path)
+        single_file = False
+    else:
+        if not args.path:
+            log.error("provide a path or --from-file")
+            return 2
+        root = Path(args.path).expanduser().resolve()
+        if not root.exists():
+            log.error("path does not exist: %s", root)
+            return 2
+        images = _iter_images(root, recursive=args.recursive)
+        if not images:
+            log.warning("no images found under %s", root)
+            return 0
+        run_label = str(root)
+        single_file = root.is_file()
 
     total = len(images)
     tagged_n = 0
@@ -86,7 +112,7 @@ async def cmd_tag(args: argparse.Namespace) -> int:
     failed_n = 0
     i = 0
 
-    if root.is_file():
+    if single_file:
         try:
             if not args.force:
                 p = preprocess.probe(images[0])
@@ -109,7 +135,7 @@ async def cmd_tag(args: argparse.Namespace) -> int:
             log.exception("[1/1] FAIL %s: %s", images[0], exc)
             return 1
 
-    log_path = runstate.begin(_run_cmd(args, root), str(root))
+    log_path = runstate.begin(_run_cmd(args, run_label), run_label)
     if log_path is None:
         log.warning("another vtag run owns run-state; this run won't appear in the webui")
     file_handler = _attach_file_log(log_path)
@@ -294,7 +320,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_tag = sub.add_parser("tag", help="Tag an image or directory")
-    p_tag.add_argument("path", help="Image file or directory")
+    p_tag.add_argument("path", nargs="?", help="Image file or directory")
+    p_tag.add_argument("--from-file", help="Newline-separated list of image paths to tag")
     p_tag.add_argument("-r", "--recursive", action="store_true", help="Recurse into subdirs")
     p_tag.add_argument("-f", "--force", action="store_true", help="Re-tag even if already embedded")
     p_tag.add_argument("-v", "--verbose", action="store_true", help="Log SKIPs")
