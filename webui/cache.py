@@ -13,6 +13,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import searchquery
+
 log = logging.getLogger("vtag-webui.cache")
 
 CACHE_DIR = Path(os.getenv("VTAG_CACHE_DIR", str(Path.home() / ".cache/vtag")))
@@ -61,6 +63,7 @@ def _card(path: str, mtime: int, payload: dict) -> dict[str, Any]:
         "mtime": int(mtime),
         "tags_top": [str(t) for t in tags[:8]],
         "tags_count": len(tags),
+        "user_labels": [str(t) for t in (payload.get("user_labels") or [])],
         "width": int(source.get("width") or 0),
         "height": int(source.get("height") or 0),
         "format": str(source.get("format") or ""),
@@ -95,26 +98,16 @@ def recent(
     return out
 
 
-def _payload_matches(path: str, payload: dict, needle: str) -> bool:
-    if needle in os.path.basename(path).lower():
-        return True
-    for t in payload.get("tags") or []:
-        if needle in str(t).lower():
-            return True
-    for c in payload.get("characters") or []:
-        if needle in str(c).lower():
-            return True
-    if needle in str(payload.get("template") or "").lower():
-        return True
-    if needle in str(payload.get("content_type") or "").lower():
-        return True
-    for line in payload.get("text_ocr") or []:
-        if needle in str(line).lower():
-            return True
+def _haystack(path: str, payload: dict) -> str:
+    parts: list[str] = [os.path.basename(path)]
+    parts += [str(t) for t in (payload.get("tags") or [])]
+    parts += [str(t) for t in (payload.get("user_labels") or [])]
+    parts.append(str(payload.get("template") or ""))
+    parts.append(str(payload.get("content_type") or ""))
+    parts += [str(t) for t in (payload.get("text_ocr") or [])]
     for field in ("description", "context", "punchline"):
-        if needle in str(payload.get(field) or "").lower():
-            return True
-    return False
+        parts.append(str(payload.get(field) or ""))
+    return " ".join(parts).lower()
 
 
 def search(
@@ -124,12 +117,24 @@ def search(
     content_type: str | None = None,
     limit: int = 300,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Filter the whole cache by free substring + content_type. Returns
+    """Filter the whole cache by free text + content_type. Returns
     (cards up to `limit`, total match count). Matches basename, tags,
-    characters, template, content_type, OCR text, and the prose fields.
+    user labels, template, content_type, OCR text, and the prose fields.
+
+    A query containing AND / OR / NOT / parentheses is evaluated as a boolean
+    expression; otherwise it is a plain substring test.
     """
-    needle = (query or "").strip().lower()
+    raw = (query or "").strip()
     ctype = (content_type or "").strip().lower() or None
+
+    predicate = None
+    needle = ""
+    if raw:
+        if searchquery.has_operators(raw):
+            predicate = searchquery.compile_query(raw)
+        else:
+            needle = raw.lower()
+
     items: list[dict[str, Any]] = []
     total = 0
     for row in conn.execute(
@@ -140,8 +145,13 @@ def search(
             continue
         if ctype and str(payload.get("content_type") or "").lower() != ctype:
             continue
-        if needle and not _payload_matches(row["path"], payload, needle):
-            continue
+        if raw:
+            hay = _haystack(row["path"], payload)
+            if predicate is not None:
+                if not predicate(hay):
+                    continue
+            elif needle not in hay:
+                continue
         total += 1
         if len(items) < limit:
             items.append(_card(row["path"], int(row["mtime"]), payload))

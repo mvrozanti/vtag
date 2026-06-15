@@ -99,7 +99,7 @@ export async function render(container, { ctx }) {
   const fromTag = sessionStorage.getItem('vtag.search.from') === 'tag';
   sessionStorage.removeItem('vtag.search.from');
 
-  const input = el('input', { attrs: { type: 'search', placeholder: 'tag, filename, content_type substring', id: 'search-q', value: initial } });
+  const input = el('input', { attrs: { type: 'search', placeholder: 'tag, label, filename — or: pepe AND (smug OR angry) NOT politics', id: 'search-q', value: initial } });
   input.style.minWidth = '20rem';
   toolbar.appendChild(input);
 

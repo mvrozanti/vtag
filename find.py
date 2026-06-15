@@ -1,4 +1,4 @@
-"""vfind: locate tagged images by tag / template / character / OCR / free text.
+"""vfind: locate tagged images by tag / template / label / OCR / free text.
 
 Reads vtag metadata embedded as XMP from each image, caching extracted payloads
 in a small sqlite index for fast subsequent searches.

@@ -79,9 +79,7 @@ def _encode_payload(tagged: schema.TaggedImage) -> str:
 def _decode_payload(b64: str) -> schema.TaggedImage:
     raw = base64.b64decode(b64.encode("ascii"))
     data = json.loads(raw.decode("utf-8"))
-    src = schema.Source(**data.pop("source", {}))
-    mdl = schema.Model(**data.pop("model", {}))
-    return schema.TaggedImage(source=src, model=mdl, **data)
+    return schema.TaggedImage.from_dict(data)
 
 
 def _build_write_args(
@@ -362,6 +360,20 @@ def read(image_path: Path) -> schema.TaggedImage | None:
         return None
 
 
+def read_raw_payload(image_path: Path) -> dict | None:
+    """Return the embedded payload as its raw dict, including legacy keys that
+    the current schema no longer models (e.g. the retired ``characters``)."""
+    blob = _read_payload_field(image_path)
+    if not blob:
+        return None
+    try:
+        raw = base64.b64decode(blob.encode("ascii"))
+        return json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        log.debug("raw payload decode failed on %s: %s", image_path, exc)
+        return None
+
+
 def already_tagged(image_path: Path, sha256: str | None = None) -> schema.TaggedImage | None:
     """Return existing TaggedImage if the image already carries vtag metadata
     of the current schema version.
@@ -400,10 +412,29 @@ def _do_write(image_path: Path, tagged: schema.TaggedImage, target_override: Pat
         )
 
 
-def write(image_path: Path, tagged: schema.TaggedImage) -> None:
+def set_user_labels(image_path: Path, labels: list[str]) -> list[str]:
+    """Overwrite the manual user_labels on an already-tagged file, leaving the
+    VLM-derived fields untouched. Returns the normalized labels written."""
+    existing = read(image_path)
+    if existing is None:
+        raise MetadataError(f"no vtag payload on {image_path}; run `vtag tag` first")
+    existing.user_labels = schema.normalize_tag_list(labels)
+    write(image_path, existing, preserve_labels=False)
+    return existing.user_labels
+
+
+def write(image_path: Path, tagged: schema.TaggedImage, *, preserve_labels: bool = True) -> None:
     fmt = tagged.source.format.upper()
     if fmt not in XMP_WRITABLE_FORMATS:
         raise MetadataError(f"XMP not writable for format {fmt!r} ({image_path})")
+
+    # Manual labels must survive a re-tag: a fresh VLM TaggedImage carries an
+    # empty user_labels, so carry over whatever the file already has unless the
+    # caller is deliberately setting labels (preserve_labels=False).
+    if preserve_labels and not tagged.user_labels:
+        prior = read(image_path)
+        if prior is not None and prior.user_labels:
+            tagged.user_labels = list(prior.user_labels)
 
     try:
         _do_write(image_path, tagged, target_override=None)

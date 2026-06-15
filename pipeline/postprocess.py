@@ -120,7 +120,6 @@ def build_tagged_image(
 
     content_type = schema.coerce_content_type(parsed.get("content_type"))
     template = str(parsed.get("template", "") or "").strip()
-    characters = _as_str_list(parsed.get("characters"))
     text_visible = _as_str_list(parsed.get("text_visible"))
     description = str(parsed.get("description", "") or "").strip()
     context = str(parsed.get("context", "") or "").strip()
@@ -163,11 +162,6 @@ def build_tagged_image(
         norm_t = schema.normalize_tag(template)
         raw_tags.append(norm_t)
         raw_tags.append(f"tpl:{norm_t}")
-    for ch in characters:
-        norm_ch = schema.normalize_tag(ch)
-        if norm_ch:
-            raw_tags.append(norm_ch)
-            raw_tags.append(f"char:{norm_ch}")
     for phrase in merged_text:
         otag = schema.ocr_phrase_tag(phrase)
         if otag:
@@ -180,7 +174,6 @@ def build_tagged_image(
         model=model,
         content_type=content_type,
         template=schema.normalize_tag(template),
-        characters=schema.normalize_tag_list(characters),
         text_ocr=merged_text,
         description=description,
         context=context,

@@ -189,8 +189,8 @@ def _summary(tagged) -> str:
     bits = [tagged.content_type]
     if tagged.template:
         bits.append(f"tpl={tagged.template}")
-    if tagged.characters:
-        bits.append("chars=" + ",".join(tagged.characters[:4]))
+    if tagged.user_labels:
+        bits.append("labels=" + ",".join(tagged.user_labels[:4]))
     if tagged.text_ocr:
         snippet = " | ".join(tagged.text_ocr)[:60]
         bits.append(f'text="{snippet}"')
@@ -229,8 +229,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     if t.category:
         head_bits.append(f"category={t.category}")
     out.append(" · ".join(head_bits))
-    if t.characters:
-        out.append("Characters: " + ", ".join(t.characters))
+    if t.user_labels:
+        out.append("Labels: " + ", ".join(t.user_labels))
     if t.cultural_refs:
         out.append("References: " + ", ".join(t.cultural_refs))
     if t.description:
@@ -261,6 +261,95 @@ def cmd_tags(args: argparse.Namespace) -> int:
     for tag in t.tags:
         print(tag)
     return 0
+
+
+def cmd_label(args: argparse.Namespace) -> int:
+    image_path = Path(args.path).expanduser().resolve()
+    existing = _require_meta(image_path)
+    if existing is None:
+        return 1 if image_path.exists() else 2
+
+    if not args.add and not args.remove and not args.clear:
+        if existing.user_labels:
+            for lab in existing.user_labels:
+                print(lab)
+        else:
+            print("(no labels)")
+        return 0
+
+    new = [] if args.clear else list(existing.user_labels)
+    for lab in args.add or []:
+        n = schema.normalize_tag(lab)
+        if n and n not in new:
+            new.append(n)
+    for lab in args.remove or []:
+        n = schema.normalize_tag(lab)
+        if n in new:
+            new.remove(n)
+
+    try:
+        written = metadata.set_user_labels(image_path, new)
+    except metadata.MetadataError as exc:
+        log.error("%s", exc)
+        return 1
+    log.info("labels on %s: %s", image_path.name, ", ".join(written) or "(none)")
+    return 0
+
+
+def cmd_drop_characters(args: argparse.Namespace) -> int:
+    root = Path(args.path).expanduser().resolve()
+    if not root.exists():
+        log.error("path does not exist: %s", root)
+        return 2
+    images = _iter_images(root, recursive=args.recursive)
+    if not images:
+        log.warning("no images found under %s", root)
+        return 0
+
+    total = len(images)
+    cleaned = skipped = failed = 0
+    if config.EXIFTOOL_DAEMON:
+        metadata.start_daemon()
+    try:
+        for i, img in enumerate(images, 1):
+            raw = metadata.read_raw_payload(img)
+            chars = (raw or {}).get("characters") or []
+            if not chars:
+                skipped += 1
+                continue
+            derived: set[str] = set()
+            for ch in chars:
+                n = schema.normalize_tag(ch)
+                if n:
+                    derived.add(n)
+                    derived.add(f"char:{n}")
+            tagged = metadata.read(img)
+            if tagged is None:
+                skipped += 1
+                continue
+            before = len(tagged.tags)
+            tagged.tags = [t for t in tagged.tags if t not in derived]
+            if args.dry_run:
+                cleaned += 1
+                log.info("[%d/%d] would clean %s (drop %d char tags)",
+                         i, total, img.name, before - len(tagged.tags))
+                continue
+            try:
+                metadata.write(img, tagged)
+                cleaned += 1
+                if args.verbose:
+                    log.info("[%d/%d] cleaned %s (-%d tags)",
+                             i, total, img.name, before - len(tagged.tags))
+            except metadata.MetadataError as exc:
+                failed += 1
+                log.warning("[%d/%d] write failed %s: %s", i, total, img, exc)
+    finally:
+        if config.EXIFTOOL_DAEMON:
+            metadata.stop_daemon()
+
+    log.info("drop-characters: %d cleaned, %d skipped, %d failed (total %d)",
+             cleaned, skipped, failed, total)
+    return 0 if failed == 0 else 1
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
@@ -341,6 +430,18 @@ def main(argv: list[str] | None = None) -> int:
     p_mig.add_argument("--delete", action="store_true", help="Delete the .tags.json after successful embed")
     p_mig.add_argument("-v", "--verbose", action="store_true", help="Log each migrated file")
 
+    p_label = sub.add_parser("label", help="Add/remove/list your own labels on an image")
+    p_label.add_argument("path", help="Image file")
+    p_label.add_argument("-a", "--add", action="append", metavar="LABEL", help="Add a label (repeatable)")
+    p_label.add_argument("-x", "--remove", action="append", metavar="LABEL", help="Remove a label (repeatable)")
+    p_label.add_argument("--clear", action="store_true", help="Remove all labels")
+
+    p_drop = sub.add_parser("drop-characters", help="Strip retired character tags from already-tagged files (metadata only, no GPU)")
+    p_drop.add_argument("path", help="Image file or directory")
+    p_drop.add_argument("-r", "--recursive", action="store_true", help="Recurse into subdirs")
+    p_drop.add_argument("-v", "--verbose", action="store_true", help="Log each cleaned file")
+    p_drop.add_argument("--dry-run", action="store_true", help="Report what would change, write nothing")
+
     args = parser.parse_args(argv)
     _setup_logging(args.log_level)
 
@@ -354,6 +455,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_info(args)
     if args.cmd == "migrate":
         return cmd_migrate(args)
+    if args.cmd == "label":
+        return cmd_label(args)
+    if args.cmd == "drop-characters":
+        return cmd_drop_characters(args)
 
     parser.error(f"unknown command {args.cmd!r}")
     return 2

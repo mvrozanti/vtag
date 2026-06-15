@@ -3,7 +3,7 @@ import { getJSON } from './api.js';
 const VIDEO_FORMATS = new Set(['MP4', 'MOV', 'MKV', 'WEBM', 'AVI']);
 
 const ARRAY_SECTIONS = [
-  ['characters', 'characters'],
+  ['user_labels', 'your labels'],
   ['cultural_refs', 'cultural refs'],
   ['emotions', 'emotions'],
   ['actions', 'actions'],

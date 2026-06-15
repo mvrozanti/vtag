@@ -43,7 +43,6 @@ class TaggedImage:
     model: Model = field(default_factory=Model)
     content_type: str = "other"
     template: str = ""
-    characters: list[str] = field(default_factory=list)
     text_ocr: list[str] = field(default_factory=list)
     description: str = ""
     context: str = ""
@@ -58,16 +57,24 @@ class TaggedImage:
     setting: list[str] = field(default_factory=list)
     cultural_refs: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    user_labels: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, ensure_ascii=False, sort_keys=False)
 
     @classmethod
+    def from_dict(cls, data: dict) -> "TaggedImage":
+        data = dict(data)
+        src_raw = data.pop("source", {}) or {}
+        mdl_raw = data.pop("model", {}) or {}
+        src = Source(**{k: v for k, v in src_raw.items() if k in Source.__dataclass_fields__})
+        mdl = Model(**{k: v for k, v in mdl_raw.items() if k in Model.__dataclass_fields__})
+        known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(source=src, model=mdl, **known)
+
+    @classmethod
     def from_json_file(cls, path: Path) -> "TaggedImage":
-        data = json.loads(path.read_text())
-        src = Source(**data.pop("source", {}))
-        mdl = Model(**data.pop("model", {}))
-        return cls(source=src, model=mdl, **data)
+        return cls.from_dict(json.loads(path.read_text()))
 
 
 _NORMALIZE_RE = re.compile(r"[^a-z0-9:]+")
