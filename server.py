@@ -8,6 +8,7 @@ GET  /api/log        plain-text tail of the active (or most recent) log
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import mimetypes
@@ -52,10 +53,11 @@ _STATIC_MIME = {
 _reindex_state: dict = {"pid": None, "started_at": None}
 _reindex_lock = threading.Lock()
 
-HOST = os.getenv("VTAG_HUB_LISTEN_HOST", "0.0.0.0")
+HOST = os.getenv("VTAG_HUB_LISTEN_HOST", "127.0.0.1")
 PORT = int(os.getenv("VTAG_HUB_LISTEN_PORT", "8093"))
 TARGET_DIR = Path(os.getenv("VTAG_HUB_TARGET_DIR", "")).expanduser()
 VTAG_BIN = os.getenv("VTAG_HUB_VTAG_BIN", "vtag")
+HUB_TOKEN = os.getenv("VTAG_HUB_TOKEN", "").strip()
 STATE_DIR = Path(os.getenv("VTAG_STATE_DIR", str(Path.home() / ".local/share/vtag")))
 LOG_DIR = Path(os.getenv("VTAG_LOG_DIR", str(STATE_DIR / "logs")))
 STATE_FILE = STATE_DIR / "run-state.json"
@@ -306,7 +308,27 @@ def _status() -> dict:
     }
 
 
+def _within_target_root(candidate: Path) -> bool:
+    """A caller-supplied target is only honored if it resolves inside the
+    configured VTAG_HUB_TARGET_DIR. Without this an unauthenticated
+    POST /api/start could launch a destructive recursive re-tag (in-place
+    exiftool -overwrite_original) over any directory on the host."""
+    if not TARGET_DIR:
+        return False
+    try:
+        root = TARGET_DIR.resolve()
+        cand = candidate.resolve()
+    except OSError:
+        return False
+    return cand == root or root in cand.parents
+
+
 def _start(target: Path | None = None) -> tuple[int, dict]:
+    if target is not None and not _within_target_root(target):
+        return HTTPStatus.FORBIDDEN, {
+            "error": "target must be inside VTAG_HUB_TARGET_DIR",
+            "target_root": str(TARGET_DIR) if TARGET_DIR else None,
+        }
     target = target or TARGET_DIR
     if not target or not target.exists():
         return HTTPStatus.BAD_REQUEST, {
@@ -738,6 +760,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+    def _authorized(self) -> bool:
+        """When VTAG_HUB_TOKEN is set, mutating endpoints require it via
+        `Authorization: Bearer <token>` or an `X-Vtag-Token` header. Unset
+        (the default) leaves them open — safe because the server binds
+        localhost by default."""
+        if not HUB_TOKEN:
+            return True
+        auth = self.headers.get("Authorization", "")
+        supplied = auth[7:].strip() if auth.startswith("Bearer ") else ""
+        if not supplied:
+            supplied = self.headers.get("X-Vtag-Token", "").strip()
+        return bool(supplied) and hmac.compare_digest(supplied, HUB_TOKEN)
+
     def _read_json_body(self) -> dict:
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -755,6 +790,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         path = parsed.path
+        if not self._authorized():
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return
         if path == "/api/start":
             body_in = self._read_json_body()
             target_raw = body_in.get("target")

@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -82,13 +83,24 @@ def _decode_payload(b64: str) -> schema.TaggedImage:
     return schema.TaggedImage.from_dict(data)
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_value(value: str) -> str:
+    """exiftool's ``-@`` arg-file protocol is strictly one argument per line
+    with no escaping for embedded newlines, so a CR/LF in a free-text value
+    would be parsed as a separate exiftool argument. Replace control chars
+    with spaces before they reach the daemon."""
+    return _CONTROL_RE.sub(" ", value)
+
+
 def _build_write_args(
     image_path: Path,
     tagged: schema.TaggedImage,
     *,
     target_override: Path | None = None,
 ) -> list[str]:
-    description = tagged.description or ""
+    description = _sanitize_value(tagged.description or "")
     title_bits = [tagged.content_type]
     if tagged.template:
         title_bits.append(tagged.template)

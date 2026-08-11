@@ -158,6 +158,7 @@ def _refresh_batch(paths: list[str]) -> dict[str, str | None]:
         et, "-config", str(EXIFTOOL_CONFIG),
         "-j", "-G1", "-s",
         "-XMP-vtag:Payload",
+        "--",
         *targets,
     ]
     result = subprocess.run(args, capture_output=True, timeout=600)

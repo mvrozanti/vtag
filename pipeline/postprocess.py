@@ -12,6 +12,15 @@ log = logging.getLogger(__name__)
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _clean_prose(value: str) -> str:
+    """Collapse newlines/tabs and strip other control characters from a
+    free-text field. Besides tidying the prose, this stops a newline in a
+    VLM-authored value from smuggling extra arguments into exiftool's
+    line-delimited arg-file protocol (see pipeline.metadata)."""
+    return " ".join(_CONTROL_RE.sub(" ", value).split())
 
 
 def parse_vlm_json(raw: str) -> dict[str, Any]:
@@ -121,9 +130,9 @@ def build_tagged_image(
     content_type = schema.coerce_content_type(parsed.get("content_type"))
     template = str(parsed.get("template", "") or "").strip()
     text_visible = _as_str_list(parsed.get("text_visible"))
-    description = str(parsed.get("description", "") or "").strip()
-    context = str(parsed.get("context", "") or "").strip()
-    punchline = str(parsed.get("punchline", "") or "").strip()
+    description = _clean_prose(str(parsed.get("description", "") or ""))
+    context = _clean_prose(str(parsed.get("context", "") or ""))
+    punchline = _clean_prose(str(parsed.get("punchline", "") or ""))
     emotions = _as_str_list(parsed.get("emotions"))
     category = str(parsed.get("category", "") or "").strip()
     visual_elements = _as_str_list(parsed.get("visual_elements"))
