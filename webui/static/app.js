@@ -1,17 +1,13 @@
 import { getJSON } from './api.js';
-import * as feed from './views/feed.js';
 import * as runner from './views/runner.js';
-import * as events from './views/events.js';
 import * as search from './views/search.js';
 import { setupPanel } from './panel.js';
 
 const ROUTES = {
-  '#/feed': feed,
-  '#/runner': runner,
-  '#/events': events,
   '#/search': search,
+  '#/runner': runner,
 };
-const DEFAULT_ROUTE = '#/feed';
+const DEFAULT_ROUTE = '#/search';
 
 const viewEl = document.getElementById('view');
 const navEl = document.getElementById('nav');

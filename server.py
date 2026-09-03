@@ -27,7 +27,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from webui import cache as webui_cache
-from webui import events as webui_events
 from webui import thumbs as webui_thumbs
 
 log = logging.getLogger("vtag-server")
@@ -628,25 +627,6 @@ class Handler(BaseHTTPRequestHandler):
             log.warning("raw read error: %s", exc)
             return
 
-    def _serve_recent(self, qs: dict[str, list[str]]) -> None:
-        try:
-            limit = max(1, min(200, int(qs.get("limit", ["60"])[0])))
-            offset = max(0, int(qs.get("offset", ["0"])[0]))
-        except ValueError:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "limit/offset must be int"})
-            return
-        content_type = qs.get("content_type", [None])[0]
-        conn = webui_cache.open_ro()
-        if conn is None:
-            self._json(HTTPStatus.OK, {"cache_available": False, "items": [], "meta": webui_cache.cache_meta(None)})
-            return
-        try:
-            items = webui_cache.recent(conn, limit=limit, offset=offset, content_type=content_type)
-            meta = webui_cache.cache_meta(conn)
-        finally:
-            conn.close()
-        self._json(HTTPStatus.OK, {"cache_available": True, "items": items, "meta": meta})
-
     def _serve_search(self, qs: dict[str, list[str]]) -> None:
         try:
             limit = max(1, min(1000, int(qs.get("limit", ["300"])[0])))
@@ -655,13 +635,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         query = qs.get("q", [""])[0] or ""
         content_type = qs.get("type", [None])[0]
+        media = qs.get("media", [None])[0]
         conn = webui_cache.open_ro()
         if conn is None:
             self._json(HTTPStatus.OK, {"cache_available": False, "items": [], "total": 0})
             return
         try:
             items, total = webui_cache.search(
-                conn, query=query, content_type=content_type, limit=limit,
+                conn, query=query, content_type=content_type, media=media, limit=limit,
             )
         finally:
             conn.close()
@@ -691,24 +672,6 @@ class Handler(BaseHTTPRequestHandler):
         path, payload = hit
         self._json(HTTPStatus.OK, {"path": path, "payload": payload})
 
-    def _serve_events(self, qs: dict[str, list[str]]) -> None:
-        kind = (qs.get("kind", ["fail"])[0] or "fail").upper()
-        if kind not in {"FAIL", "SKIP", "OK"}:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "kind must be fail|skip|ok"})
-            return
-        try:
-            limit = max(1, min(500, int(qs.get("limit", ["100"])[0])))
-        except ValueError:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "limit must be int"})
-            return
-        events = webui_events.latest_events(LOG_DIR, kind=kind, limit=limit)
-        log_path = webui_events.latest_log(LOG_DIR)
-        self._json(HTTPStatus.OK, {
-            "kind": kind,
-            "items": events,
-            "log": str(log_path) if log_path else None,
-        })
-
     def _serve_cache_meta(self) -> None:
         conn = webui_cache.open_ro()
         try:
@@ -737,9 +700,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/log":
             self._text(HTTPStatus.OK, _read_log_tail())
             return
-        if path == "/api/recent":
-            self._serve_recent(qs)
-            return
         if path == "/api/search":
             self._serve_search(qs)
             return
@@ -751,9 +711,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/raw":
             self._serve_raw(qs.get("sha", [""])[0])
-            return
-        if path == "/api/events":
-            self._serve_events(qs)
             return
         if path == "/api/cache_meta":
             self._serve_cache_meta()

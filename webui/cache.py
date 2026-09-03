@@ -19,6 +19,12 @@ log = logging.getLogger("vtag-webui.cache")
 
 CACHE_DIR = Path(os.getenv("VTAG_CACHE_DIR", str(Path.home() / ".cache/vtag")))
 CACHE_DB = CACHE_DIR / "index.sqlite"
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+
+
+def _media_kind(path: str) -> str:
+    return "video" if os.path.splitext(path)[1].lower() in VIDEO_EXTS else "image"
+
 
 _BY_SHA_SCAN_CAP = 20000
 
@@ -67,35 +73,8 @@ def _card(path: str, mtime: int, payload: dict) -> dict[str, Any]:
         "width": int(source.get("width") or 0),
         "height": int(source.get("height") or 0),
         "format": str(source.get("format") or ""),
+        "media": _media_kind(path),
     }
-
-
-def recent(
-    conn: sqlite3.Connection,
-    *,
-    limit: int = 60,
-    offset: int = 0,
-    content_type: str | None = None,
-) -> list[dict[str, Any]]:
-    # Pull a larger page when filtering so the post-decode filter still yields ~limit.
-    raw_limit = limit * 4 if content_type else limit
-    rows = conn.execute(
-        "SELECT path, mtime, payload FROM images "
-        "WHERE payload IS NOT NULL "
-        "ORDER BY mtime DESC LIMIT ? OFFSET ?",
-        (raw_limit, offset),
-    ).fetchall()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        payload = decode_payload(row["payload"])
-        if payload is None:
-            continue
-        if content_type and str(payload.get("content_type") or "").lower() != content_type.lower():
-            continue
-        out.append(_card(row["path"], int(row["mtime"]), payload))
-        if len(out) >= limit:
-            break
-    return out
 
 
 def _haystack(path: str, payload: dict) -> str:
@@ -120,25 +99,21 @@ def search(
     *,
     query: str | None = None,
     content_type: str | None = None,
+    media: str | None = None,
     limit: int = 300,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Filter the whole cache by free text + content_type. Returns
-    (cards up to `limit`, total match count). Matches basename, tags,
-    user labels, template, content_type, OCR text, and the prose fields.
+    """Filter the whole cache by free text + content_type + media kind.
+    Returns (cards up to `limit`, total match count). Matches basename,
+    tags, user labels, template, content_type, and OCR text.
 
-    A query containing AND / OR / NOT / parentheses is evaluated as a boolean
-    expression; otherwise it is a plain substring test.
+    A query is tokenized into terms and ANDed; AND / OR / NOT / parentheses
+    are evaluated as a boolean expression.
     """
     raw = (query or "").strip()
     ctype = (content_type or "").strip().lower() or None
+    mkind = (media or "").strip().lower() or None
 
-    predicate = None
-    needle = ""
-    if raw:
-        if searchquery.has_operators(raw):
-            predicate = searchquery.compile_query(raw)
-        else:
-            needle = raw.lower()
+    predicate = searchquery.compile_query(raw) if raw else None
 
     items: list[dict[str, Any]] = []
     total = 0
@@ -150,13 +125,10 @@ def search(
             continue
         if ctype and str(payload.get("content_type") or "").lower() != ctype:
             continue
-        if raw:
-            hay = _haystack(row["path"], payload)
-            if predicate is not None:
-                if not predicate(hay):
-                    continue
-            elif needle not in hay:
-                continue
+        if mkind and _media_kind(row["path"]) != mkind:
+            continue
+        if predicate is not None and not predicate(_haystack(row["path"], payload)):
+            continue
         total += 1
         if len(items) < limit:
             items.append(_card(row["path"], int(row["mtime"]), payload))

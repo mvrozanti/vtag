@@ -38,10 +38,6 @@ def _tokenize(q: str) -> list[tuple[str, str]]:
     return tokens
 
 
-def has_operators(q: str) -> bool:
-    return any(kind in _OPERATORS or kind in ("(", ")") for kind, _ in _tokenize(q))
-
-
 class _Parser:
     def __init__(self, tokens: list[tuple[str, str]]):
         self.toks = tokens

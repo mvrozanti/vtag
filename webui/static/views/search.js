@@ -1,4 +1,4 @@
-import { getJSON } from '../api.js';
+import { getJSON, postJSON } from '../api.js';
 
 const RESULT_LIMIT = 300;
 const DEBOUNCE_MS = 180;
@@ -20,6 +20,7 @@ function el(tag, opts = {}, ...children) {
 }
 
 const VALID_TYPES = ['', 'meme', 'photo', 'screenshot_text', 'screenshot_app', 'graph_chart', 'diagram', 'art', 'other'];
+const MEDIA_KINDS = ['', 'image', 'video'];
 
 function cardEl(item, ctx) {
   const card = el('div', { cls: 'card', attrs: { 'data-sha': item.sha, tabindex: '0' } });
@@ -40,6 +41,9 @@ function cardEl(item, ctx) {
   if (item.content_type && item.content_type !== 'other') {
     thumb.appendChild(el('span', { cls: 'badge', text: item.content_type.replace('_', ' ') }));
   }
+  if (item.media === 'video') {
+    thumb.appendChild(el('span', { cls: 'badge video', text: 'video' }));
+  }
   card.appendChild(thumb);
   const meta = el('div', { cls: 'meta' });
   meta.appendChild(el('div', { cls: 'name', text: item.basename, attrs: { title: item.path } }));
@@ -58,11 +62,12 @@ function cardEl(item, ctx) {
   return card;
 }
 
-async function runSearch(grid, status, query, contentType, ctx) {
+async function runSearch(grid, status, query, contentType, media, ctx) {
   status.textContent = 'searching…';
   const params = new URLSearchParams();
   if (query) params.set('q', query);
   if (contentType) params.set('type', contentType);
+  if (media) params.set('media', media);
   params.set('limit', String(RESULT_LIMIT));
   const r = await getJSON('/api/search?' + params.toString());
   const body = r.body || {};
@@ -71,7 +76,7 @@ async function runSearch(grid, status, query, contentType, ctx) {
     status.textContent = '0 match';
     const e = el('div', { cls: 'empty' });
     e.appendChild(el('h2', { text: 'no cache' }));
-    e.appendChild(el('p', { text: 'Reindex first — feed view has the button.' }));
+    e.appendChild(el('p', { text: 'No index yet — hit reindex in the toolbar above.' }));
     grid.appendChild(e);
     return;
   }
@@ -108,6 +113,20 @@ export async function render(container, { ctx }) {
   VALID_TYPES.forEach(t => select.appendChild(el('option', { attrs: { value: t }, text: t || 'all' })));
   toolbar.appendChild(select);
 
+  toolbar.appendChild(el('span', { cls: 'label', text: 'media' }));
+  const mediaSelect = el('select');
+  MEDIA_KINDS.forEach(k => mediaSelect.appendChild(el('option', { attrs: { value: k }, text: k || 'all' })));
+  toolbar.appendChild(mediaSelect);
+
+  const reindexBtn = el('button', { text: 'reindex' });
+  reindexBtn.addEventListener('click', async () => {
+    const r = await postJSON('/api/reindex');
+    if (r.status === 202) ctx.toast('reindex started');
+    else if (r.status === 409) ctx.toast('reindex already running');
+    else ctx.toast(r.body?.error || 'reindex failed');
+  });
+  toolbar.appendChild(reindexBtn);
+
   toolbar.appendChild(el('span', { cls: 'grow' }));
   const status = el('span', { cls: 'label', id: 'search-status', text: 'loading…' });
   toolbar.appendChild(status);
@@ -116,13 +135,14 @@ export async function render(container, { ctx }) {
   const grid = el('div', { cls: 'card-grid' });
   container.appendChild(grid);
 
-  const query = () => runSearch(grid, status, input.value.trim(), select.value, ctx);
+  const query = () => runSearch(grid, status, input.value.trim(), select.value, mediaSelect.value, ctx);
   function schedule() {
     clearTimeout(timer);
     timer = setTimeout(query, DEBOUNCE_MS);
   }
   input.addEventListener('input', schedule);
   select.addEventListener('change', query);
+  mediaSelect.addEventListener('change', query);
   await query();
 
   if (fromTag && !document.activeElement?.tagName?.match(/INPUT|SELECT/)) {
