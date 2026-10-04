@@ -224,9 +224,17 @@ def _sync_cache(conn: sqlite3.Connection, files: list[tuple[str, int, int]]) -> 
                 )
 
 
-def _prune_missing(conn: sqlite3.Connection, present: set[str]) -> None:
+def _under_roots(path: str, roots: list[Path]) -> bool:
+    for root in roots:
+        top = str(root)
+        if path == top or path.startswith(top.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _prune_missing(conn: sqlite3.Connection, present: set[str], roots: list[Path]) -> None:
     rows = conn.execute("SELECT path FROM images").fetchall()
-    missing = [r[0] for r in rows if r[0] not in present]
+    missing = [r[0] for r in rows if r[0] not in present and _under_roots(r[0], roots)]
     if missing:
         with conn:
             conn.executemany("DELETE FROM images WHERE path=?", [(p,) for p in missing])
@@ -334,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.no_refresh:
         _sync_cache(conn, files)
-    _prune_missing(conn, present)
+    _prune_missing(conn, present, roots)
 
     matches: list[tuple[str, dict, int]] = []
     for path, payload_b64 in conn.execute(
