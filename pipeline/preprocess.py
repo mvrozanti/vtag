@@ -85,6 +85,28 @@ def _probe_video(path: Path) -> tuple[str, int, int, int]:
     return fmt, width, height, frames
 
 
+def _sniff_video(path: Path) -> tuple[str, int, int, int] | None:
+    try:
+        with av.open(str(path)) as container:
+            demuxers = set(container.format.name.split(","))
+            stream = next((s for s in container.streams if s.type == "video"), None)
+            codec = stream.codec_context.name if stream is not None else ""
+    except (av.FFmpegError, EOFError, OSError):
+        return None
+    if stream is None:
+        return None
+    if "mp4" in demuxers:
+        fmt = "MP4"
+    elif "webm" in demuxers and codec in {"vp8", "vp9", "av1"}:
+        fmt = "WEBM"
+    elif "matroska" in demuxers:
+        fmt = "MKV"
+    else:
+        return None
+    _, width, height, frames = _probe_video(path)
+    return fmt, width, height, frames
+
+
 def probe(path: Path) -> Probe:
     st = path.stat()
     digest = sha256_file(path)
@@ -97,7 +119,10 @@ def probe(path: Path) -> Probe:
                 width, height = img.size
                 frames = getattr(img, "n_frames", 1) or 1
         except (UnidentifiedImageError, OSError, SyntaxError) as exc:
-            raise CorruptSourceError(f"PIL cannot open {path}: {exc}") from exc
+            sniffed = _sniff_video(path)
+            if sniffed is None:
+                raise CorruptSourceError(f"PIL cannot open {path}: {exc}") from exc
+            fmt, width, height, frames = sniffed
     return Probe(
         sha256=digest,
         size_bytes=st.st_size,
@@ -142,13 +167,20 @@ def _midpoint_image(path: Path) -> Image.Image:
     try:
         with Image.open(path) as img:
             n = getattr(img, "n_frames", 1) or 1
-            target = max(0, n // 2)
-            if n > 1:
-                for i, frame in enumerate(ImageSequence.Iterator(img)):
-                    if i == target:
-                        return frame.convert("RGB").copy()
+            if n == 1:
                 return img.convert("RGB").copy()
-            return img.convert("RGB").copy()
+            target = n // 2
+            last_good = None
+            try:
+                for i, frame in enumerate(ImageSequence.Iterator(img)):
+                    last_good = frame.convert("RGB").copy()
+                    if i >= target:
+                        break
+            except (OSError, SyntaxError, EOFError) as exc:
+                if last_good is None:
+                    raise
+                log.warning("frame decode failed in %s, using last good frame: %s", path, exc)
+            return last_good if last_good is not None else img.convert("RGB").copy()
     except (UnidentifiedImageError, OSError, SyntaxError) as exc:
         raise CorruptSourceError(f"PIL decode failed on {path}: {exc}") from exc
 
