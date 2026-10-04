@@ -55,6 +55,7 @@ _reindex_lock = threading.Lock()
 HOST = os.getenv("VTAG_HUB_LISTEN_HOST", "127.0.0.1")
 PORT = int(os.getenv("VTAG_HUB_LISTEN_PORT", "8093"))
 TARGET_DIR = Path(os.getenv("VTAG_HUB_TARGET_DIR", "")).expanduser()
+BROWSE_ROOTS = (TARGET_DIR.resolve(),) if os.getenv("VTAG_HUB_TARGET_DIR", "").strip() else ()
 VTAG_BIN = os.getenv("VTAG_HUB_VTAG_BIN", "vtag")
 HUB_TOKEN = os.getenv("VTAG_HUB_TOKEN", "").strip()
 STATE_DIR = Path(os.getenv("VTAG_STATE_DIR", str(Path.home() / ".local/share/vtag")))
@@ -514,6 +515,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._bytes(HTTPStatus.OK, data, ctype, cache="no-cache, must-revalidate")
 
+    def _lookup(self, doc_id: str) -> webui_cache.Doc | None:
+        snap = webui_cache.snapshot(BROWSE_ROOTS)
+        if snap is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
+            return None
+        doc = snap.get(doc_id)
+        if doc is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
+        return doc
+
     def _serve_thumb(self, sha: str) -> None:
         sha = (sha or "").lower()
         if not re.fullmatch(r"[0-9a-f]{16,64}", sha):
@@ -528,19 +539,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._bytes(HTTPStatus.OK, data, "image/jpeg", cache="public, max-age=86400")
             return
-        conn = webui_cache.open_ro()
-        if conn is None:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
+        doc = self._lookup(sha)
+        if doc is None:
             return
-        try:
-            hit = webui_cache.by_sha(conn, sha)
-        finally:
-            conn.close()
-        if hit is None:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
-            return
-        source_path, _payload = hit
-        out = webui_thumbs.ensure(sha, source_path)
+        out = webui_thumbs.ensure(sha, doc.path)
         if out is None or not out.exists():
             self._json(HTTPStatus.NOT_FOUND, {"error": "thumbnail unavailable"})
             return
@@ -556,19 +558,10 @@ class Handler(BaseHTTPRequestHandler):
         if not re.fullmatch(r"[0-9a-f]{16,64}", sha):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid sha"})
             return
-        conn = webui_cache.open_ro()
-        if conn is None:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
+        doc = self._lookup(sha)
+        if doc is None:
             return
-        try:
-            hit = webui_cache.by_sha(conn, sha)
-        finally:
-            conn.close()
-        if hit is None:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
-            return
-        source_path, _payload = hit
-        p = Path(source_path)
+        p = Path(doc.path)
         try:
             size = p.stat().st_size
         except OSError as exc:
@@ -630,26 +623,26 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_search(self, qs: dict[str, list[str]]) -> None:
         try:
             limit = max(1, min(1000, int(qs.get("limit", ["300"])[0])))
+            offset = max(0, int(qs.get("offset", ["0"])[0]))
         except ValueError:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "limit must be int"})
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "limit and offset must be int"})
             return
         query = qs.get("q", [""])[0] or ""
         content_type = qs.get("type", [None])[0]
         media = qs.get("media", [None])[0]
-        conn = webui_cache.open_ro()
-        if conn is None:
-            self._json(HTTPStatus.OK, {"cache_available": False, "items": [], "total": 0})
+        snap = webui_cache.snapshot(BROWSE_ROOTS)
+        if snap is None:
+            self._json(HTTPStatus.OK, {"cache_available": False, "items": [], "total": 0, "fuzzy": 0})
             return
-        try:
-            items, total = webui_cache.search(
-                conn, query=query, content_type=content_type, media=media, limit=limit,
-            )
-        finally:
-            conn.close()
+        items, total, fuzzy = snap.search(
+            query=query, content_type=content_type, media=media, limit=limit, offset=offset,
+        )
         self._json(HTTPStatus.OK, {
             "cache_available": True,
             "items": items,
             "total": total,
+            "fuzzy": fuzzy,
+            "offset": offset,
             "returned": len(items),
         })
 
@@ -658,27 +651,14 @@ class Handler(BaseHTTPRequestHandler):
         if not re.fullmatch(r"[0-9a-f]{16,64}", sha):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid sha"})
             return
-        conn = webui_cache.open_ro()
-        if conn is None:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
+        doc = self._lookup(sha)
+        if doc is None:
             return
-        try:
-            hit = webui_cache.by_sha(conn, sha)
-        finally:
-            conn.close()
-        if hit is None:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
-            return
-        path, payload = hit
-        self._json(HTTPStatus.OK, {"path": path, "payload": payload})
+        self._json(HTTPStatus.OK, {"path": doc.path, "payload": doc.payload, "tagged": doc.payload is not None})
 
     def _serve_cache_meta(self) -> None:
-        conn = webui_cache.open_ro()
-        try:
-            meta = webui_cache.cache_meta(conn)
-        finally:
-            if conn is not None:
-                conn.close()
+        snap = webui_cache.snapshot(BROWSE_ROOTS)
+        meta = snap.meta() if snap else {"db_exists": False, "count": 0, "tagged": 0, "last_mtime": 0}
         meta["reindex"] = _reindex_status()
         self._json(HTTPStatus.OK, meta)
 
@@ -776,6 +756,7 @@ def main() -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log.info("vtag-server listening on %s:%d (target=%s)", HOST, PORT, TARGET_DIR or "<unset>")
+    threading.Thread(target=webui_cache.snapshot, args=(BROWSE_ROOTS,), daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         srv.serve_forever()

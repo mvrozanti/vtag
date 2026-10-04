@@ -135,6 +135,8 @@ main { position: relative; z-index: 1; padding: 1.5rem; max-width: 1400px; margi
 }
 .card .badge.other { color: var(--dim); border-color: var(--dim); box-shadow: none; }
 .card .badge.video { left: 0.35rem; right: auto; color: var(--warn); border-color: var(--warn); box-shadow: none; }
+.card .badge.fuzzy { top: auto; bottom: 0.35rem; left: 0.35rem; right: auto; color: var(--dim); border-color: var(--dim); box-shadow: none; text-transform: none; }
+.card.fuzzy { opacity: 0.8; }
 .card .meta { padding: 0.55rem 0.65rem; display: flex; flex-direction: column; gap: 0.25rem; min-height: 4.4rem; }
 .card .name {
   font-size: 0.72rem; color: var(--fg);

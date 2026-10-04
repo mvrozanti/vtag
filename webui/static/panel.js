@@ -1,6 +1,7 @@
 import { getJSON } from './api.js';
 
 const VIDEO_FORMATS = new Set(['MP4', 'MOV', 'MKV', 'WEBM', 'AVI']);
+const VIDEO_EXT_RE = /\.(mp4|mov|mkv|webm|avi)$/i;
 
 const ARRAY_SECTIONS = [
   ['user_labels', 'your labels'],
@@ -97,14 +98,15 @@ export function setupPanel({ ctx }) {
     openSha = sha;
     const r = await getJSON(`/api/item?sha=${encodeURIComponent(sha)}`);
     if (openSha !== sha) return;
-    if (!r.ok || !r.body || !r.body.payload) {
-      showError(r.body?.error || 'no payload');
+    if (!r.ok || !r.body || !r.body.path) {
+      showError(r.body?.error || 'not found');
       return;
     }
-    render(r.body.path, r.body.payload);
+    render(sha, r.body.path, r.body.payload || null);
   }
 
-  function render(path, payload) {
+  function render(sha, path, tagged) {
+    const payload = tagged || {};
     inner.innerHTML = '';
     const source = payload.source || {};
     const model = payload.model || {};
@@ -119,9 +121,9 @@ export function setupPanel({ ctx }) {
     );
     inner.appendChild(head);
 
-    const sha = source.sha256 || '';
     const fmt = String(source.format || '').toUpperCase();
-    if (sha && VIDEO_FORMATS.has(fmt)) {
+    const isVideo = fmt ? VIDEO_FORMATS.has(fmt) : VIDEO_EXT_RE.test(path);
+    if (sha && isVideo) {
       const v = el('video', { cls: 'panel-thumb', attrs: {
         controls: '',
         preload: 'metadata',
@@ -141,6 +143,10 @@ export function setupPanel({ ctx }) {
       full.onload = () => { img.src = rawUrl; };
       full.src = rawUrl;
       inner.appendChild(img);
+    }
+
+    if (!tagged) {
+      inner.appendChild(section('untagged', el('p', { cls: 'italic', text: 'Found by filename — not tagged yet.' })));
     }
 
     const typeBadges = badgeRow([

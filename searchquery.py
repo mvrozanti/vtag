@@ -1,9 +1,4 @@
-"""Optional boolean search grammar for vtag.
-
-Plain queries with no operators are handled by the caller as a simple
-substring test. When a query contains the uppercase operators AND / OR / NOT
-or parentheses, `compile_query` turns it into a predicate over a (already
-lowercased) haystack string.
+"""Boolean search grammar for vtag, scored.
 
 Grammar (precedence: NOT > AND > OR, implicit AND between adjacent terms):
     expr   := or
@@ -11,13 +6,30 @@ Grammar (precedence: NOT > AND > OR, implicit AND between adjacent terms):
     and    := not (AND? not)*
     not    := NOT not | atom
     atom   := '(' expr ')' | TERM
-A TERM matches when its lowercased text is a substring of the haystack.
 Quote a term ("two buttons") to include spaces or a literal and/or/not.
+
+`compile_query(q, term_scorer)` returns a function doc -> Hit | None, where
+None means no match. `term_scorer(text)` builds the per-term function. AND sums
+its operands, OR keeps the best, NOT matches with score 0.
 """
 from __future__ import annotations
 
 import re
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class Hit:
+    score: float
+    fuzzy: bool = field(default=False)
+
+    def __add__(self, other: Hit) -> Hit:
+        return Hit(self.score + other.score, self.fuzzy or other.fuzzy)
+
+
+Scorer = Callable[[Any], "Hit | None"]
 
 _TOKEN_RE = re.compile(r'\s*("[^"]*"|\(|\)|[^\s()]+)')
 _OPERATORS = {"AND", "OR", "NOT"}
@@ -29,19 +41,47 @@ def _tokenize(q: str) -> list[tuple[str, str]]:
         raw = m.group(1)
         if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
             tokens.append(("TERM", raw[1:-1]))
-        elif raw in ("(", ")"):
-            tokens.append((raw, raw))
-        elif raw in _OPERATORS:
+        elif raw in ("(", ")") or raw in _OPERATORS:
             tokens.append((raw, raw))
         else:
             tokens.append(("TERM", raw))
     return tokens
 
 
+def _never(_doc: Any) -> None:
+    return None
+
+
+def _both(a: Scorer, b: Scorer) -> Scorer:
+    def run(doc: Any) -> Hit | None:
+        left = a(doc)
+        if left is None:
+            return None
+        right = b(doc)
+        return None if right is None else left + right
+    return run
+
+
+def _either(a: Scorer, b: Scorer) -> Scorer:
+    def run(doc: Any) -> Hit | None:
+        left, right = a(doc), b(doc)
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return left if left.score >= right.score else right
+    return run
+
+
+def _negate(a: Scorer) -> Scorer:
+    return lambda doc: Hit(0.0) if a(doc) is None else None
+
+
 class _Parser:
-    def __init__(self, tokens: list[tuple[str, str]]):
+    def __init__(self, tokens: list[tuple[str, str]], term_scorer: Callable[[str], Scorer]):
         self.toks = tokens
         self.i = 0
+        self.term_scorer = term_scorer
 
     def _peek(self) -> str | None:
         return self.toks[self.i][0] if self.i < len(self.toks) else None
@@ -51,40 +91,34 @@ class _Parser:
         self.i += 1
         return tok
 
-    def parse(self) -> Callable[[str], bool]:
-        node = self._or()
-        return node
+    def parse(self) -> Scorer:
+        return self._or()
 
-    def _or(self) -> Callable[[str], bool]:
+    def _or(self) -> Scorer:
         left = self._and()
         while self._peek() == "OR":
             self._next()
-            right = self._and()
-            left = (lambda a, b: (lambda h: a(h) or b(h)))(left, right)
+            left = _either(left, self._and())
         return left
 
-    def _and(self) -> Callable[[str], bool]:
+    def _and(self) -> Scorer:
         left = self._not()
         while True:
             nxt = self._peek()
             if nxt == "AND":
                 self._next()
-                right = self._not()
-            elif nxt in ("TERM", "NOT", "("):
-                right = self._not()
-            else:
+            elif nxt not in ("TERM", "NOT", "("):
                 break
-            left = (lambda a, b: (lambda h: a(h) and b(h)))(left, right)
+            left = _both(left, self._not())
         return left
 
-    def _not(self) -> Callable[[str], bool]:
+    def _not(self) -> Scorer:
         if self._peek() == "NOT":
             self._next()
-            operand = self._not()
-            return (lambda a: (lambda h: not a(h)))(operand)
+            return _negate(self._not())
         return self._atom()
 
-    def _atom(self) -> Callable[[str], bool]:
+    def _atom(self) -> Scorer:
         kind = self._peek()
         if kind == "(":
             self._next()
@@ -94,16 +128,13 @@ class _Parser:
             return inner
         if kind == "TERM":
             _, term = self._next()
-            needle = term.lower()
-            return (lambda n: (lambda h: n in h))(needle)
-        # Unexpected/empty: match nothing rather than raising.
+            return self.term_scorer(term)
         self.i += 1
-        return lambda h: False
+        return _never
 
 
-def compile_query(q: str) -> Callable[[str], bool]:
-    """Return predicate(haystack_lowercased) -> bool for a boolean query."""
+def compile_query(q: str, term_scorer: Callable[[str], Scorer]) -> Scorer:
     tokens = _tokenize(q)
     if not tokens:
-        return lambda h: True
-    return _Parser(tokens).parse()
+        return lambda _doc: Hit(0.0)
+    return _Parser(tokens, term_scorer).parse()
