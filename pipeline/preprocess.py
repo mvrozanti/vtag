@@ -79,7 +79,7 @@ def _probe_video(path: Path) -> tuple[str, int, int, int]:
                 frames = max(1, int(duration_s * float(stream.average_rate)))
             if frames <= 0:
                 frames = 1
-    except (av.AVError, EOFError, OSError) as exc:
+    except (av.FFmpegError, EOFError, OSError) as exc:
         raise CorruptSourceError(f"av cannot open {path}: {exc}") from exc
     fmt = _VIDEO_EXT_TO_FORMAT.get(path.suffix.lower(), "VIDEO")
     return fmt, width, height, frames
@@ -123,7 +123,7 @@ def _midpoint_video_frame(path: Path) -> Image.Image:
                 seek_pts = int(stream.duration / 2)
                 try:
                     container.seek(seek_pts, stream=stream, any_frame=False)
-                except av.AVError:
+                except av.FFmpegError:
                     seekable = False
 
             chosen = None
@@ -134,7 +134,7 @@ def _midpoint_video_frame(path: Path) -> Image.Image:
             if chosen is None:
                 raise CorruptSourceError(f"no decodable video frame in {path}")
             return chosen.to_image()
-    except (av.AVError, EOFError, OSError) as exc:
+    except (av.FFmpegError, EOFError, OSError) as exc:
         raise CorruptSourceError(f"av decode failed on {path}: {exc}") from exc
 
 
