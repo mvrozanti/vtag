@@ -521,6 +521,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
             return None
         doc = snap.get(doc_id)
+        if doc is not None and not webui_cache.unchanged(doc):
+            webui_cache.invalidate()
+            snap = webui_cache.snapshot(BROWSE_ROOTS)
+            doc = snap.get(doc_id) if snap is not None else None
         if doc is None:
             self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
         return doc

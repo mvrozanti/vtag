@@ -1,7 +1,7 @@
 """Thumbnail cache keyed by sha256.
 
 Pillow opens the source, downscales to ~256 px on the long edge, writes a JPEG
-under `~/.cache/vtag/thumbs/<sha>.jpg`. Video formats and unreadable images
+under `~/.cache/vtag/thumbs-v2/<id>.jpg`. Video formats and unreadable images
 return None — the client renders a placeholder tile.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ except ImportError:
     UnidentifiedImageError = Exception  # type: ignore[assignment,misc]
 
 CACHE_DIR = Path(os.getenv("VTAG_CACHE_DIR", str(Path.home() / ".cache/vtag")))
-THUMB_DIR = CACHE_DIR / "thumbs"
+THUMB_DIR = CACHE_DIR / "thumbs-v2"
 THUMB_EDGE = int(os.getenv("VTAG_THUMB_EDGE", "256"))
 THUMB_QUALITY = int(os.getenv("VTAG_THUMB_QUALITY", "82"))
 

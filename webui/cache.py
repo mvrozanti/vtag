@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import find
 import fuzzymatch
 import searchquery
 from searchquery import Hit
@@ -56,14 +57,24 @@ def decode_payload(payload_b64: str | None) -> dict | None:
         return None
 
 
-def path_id(path: str) -> str:
-    return hashlib.sha256(path.encode("utf-8", "surrogateescape")).hexdigest()
+def path_id(path: str, stamp: tuple[int, int] = (0, 0)) -> str:
+    key = f"{path}\0{stamp[0]}\0{stamp[1]}"
+    return hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def file_stamp(path: str) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
 
 
 @dataclass(slots=True)
 class Doc:
     id: str
     path: str
+    stamp: tuple[int, int]
     mtime: int
     payload: dict | None
     content_type: str
@@ -94,14 +105,24 @@ def _reldir(path: str, roots: tuple[str, ...]) -> str:
     return ""
 
 
-def _doc(path: str, mtime: int, payload: dict | None, roots: tuple[str, ...]) -> Doc:
+def _doc(
+    path: str,
+    mtime: int,
+    payload: dict | None,
+    roots: tuple[str, ...],
+    stamp: tuple[int, int] = (0, 0),
+    taken: dict[str, "Doc"] | None = None,
+) -> Doc:
     basename = os.path.basename(path)
     text = fuzzymatch.FIELD_BREAK.join(_text_fields(payload, _reldir(path, roots)))
     source = (payload or {}).get("source") or {}
     sha = str(source.get("sha256") or "").lower()
+    if taken is not None and sha in taken:
+        sha = ""
     return Doc(
-        id=sha or path_id(path),
+        id=sha or path_id(path, stamp),
         path=path,
+        stamp=stamp,
         mtime=int(mtime),
         payload=payload,
         content_type=str((payload or {}).get("content_type") or "").lower(),
@@ -241,7 +262,7 @@ def _build(roots: tuple[str, ...]) -> Snapshot | None:
     for root in roots:
         clauses.append("(path >= ? AND path < ?)")
         params += [root + os.sep, root + chr(ord(os.sep) + 1)]
-    sql = f"SELECT path, mtime, payload FROM images WHERE {' OR '.join(clauses)} ORDER BY mtime DESC"
+    sql = f"SELECT path, mtime, size, payload FROM images WHERE {' OR '.join(clauses)} ORDER BY mtime DESC"
     try:
         rows = conn.execute(sql, params).fetchall()
     except sqlite3.Error as exc:
@@ -256,11 +277,14 @@ def _build(roots: tuple[str, ...]) -> Snapshot | None:
         payload = decode_payload(row["payload"])
         if row["payload"] and payload is None:
             continue
-        if not os.path.exists(row["path"]):
+        stamp = file_stamp(row["path"])
+        if stamp is None:
             continue
-        doc = _doc(row["path"], row["mtime"], payload, roots)
+        if payload is not None and find.index_stat(row["path"]) != (row["mtime"], row["size"]):
+            payload = None
+        doc = _doc(row["path"], row["mtime"], payload, roots, stamp, by_id)
         docs.append(doc)
-        by_id.setdefault(doc.id, doc)
+        by_id[doc.id] = doc
         tagged += payload is not None
     last = max((d.mtime for d in docs), default=0)
     return Snapshot(docs=docs, by_id=by_id, tagged=tagged, last_mtime=last)
@@ -268,6 +292,15 @@ def _build(roots: tuple[str, ...]) -> Snapshot | None:
 
 _lock = threading.Lock()
 _state: dict[str, Any] = {"snap": None, "sig": None, "roots": None, "at": 0.0}
+
+
+def unchanged(doc: Doc) -> bool:
+    return file_stamp(doc.path) == doc.stamp
+
+
+def invalidate() -> None:
+    with _lock:
+        _state.update(sig=None, at=0.0)
 
 
 def snapshot(browse_roots: Iterable[Path | str] = ()) -> Snapshot | None:

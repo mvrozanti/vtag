@@ -1,4 +1,4 @@
-import { getJSON, postJSON } from '../api.js';
+import { getJSON, postJSON, thumbUrl } from '../api.js';
 
 const PAGE_SIZE = 120;
 const PREFETCH_PX = 1200;
@@ -29,7 +29,7 @@ function cardEl(item, ctx) {
   const card = el('div', { cls: item.fuzzy ? 'card fuzzy' : 'card', attrs: { 'data-sha': item.sha, tabindex: '0' } });
   const thumb = el('div', { cls: 'thumb loading' });
   if (item.sha) {
-    const url = `/api/thumb?sha=${encodeURIComponent(item.sha)}`;
+    const url = thumbUrl(item.sha);
     thumb.style.backgroundImage = `url("${url}")`;
     const probe = new Image();
     probe.onload = () => thumb.classList.remove('loading');

@@ -1,4 +1,9 @@
 const COMMON = { credentials: 'same-origin', cache: 'no-store' };
+const THUMB_VERSION = 2;
+
+export function thumbUrl(sha) {
+  return `/api/thumb?sha=${encodeURIComponent(sha)}&v=${THUMB_VERSION}`;
+}
 
 export async function getJSON(path) {
   const r = await fetch(path, COMMON);

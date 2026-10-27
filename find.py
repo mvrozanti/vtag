@@ -51,6 +51,17 @@ def _meta_stat(media_path: str) -> tuple[int, int]:
     except OSError:
         return 0, 0
     return int(st.st_mtime), int(st.st_size)
+
+
+def index_stat(media_path: str) -> tuple[int, int] | None:
+    mtime, size = _meta_stat(media_path)
+    if mtime:
+        return mtime, size
+    try:
+        st = os.stat(media_path)
+    except OSError:
+        return None
+    return int(st.st_mtime), int(st.st_size)
 CACHE_DIR = Path(os.getenv("VTAG_CACHE_DIR", str(Path.home() / ".cache/vtag")))
 CACHE_DB = CACHE_DIR / "index.sqlite"
 CACHE_SCHEMA_VERSION = 1
@@ -105,14 +116,9 @@ def _iter_image_files(roots: list[Path]) -> list[tuple[str, int, int]]:
         if root.is_file():
             if root.suffix.lower() in IMAGE_EXTS:
                 full = str(root)
-                mtime, size = _meta_stat(full)
-                if mtime == 0:
-                    try:
-                        st = root.stat()
-                        mtime, size = int(st.st_mtime), int(st.st_size)
-                    except OSError:
-                        continue
-                out.append((full, mtime, size))
+                stat = index_stat(full)
+                if stat is not None:
+                    out.append((full, *stat))
             continue
         for dirpath, _dirs, files in os.walk(root):
             for name in files:
@@ -120,14 +126,9 @@ def _iter_image_files(roots: list[Path]) -> list[tuple[str, int, int]]:
                 if ext not in IMAGE_EXTS:
                     continue
                 full = os.path.join(dirpath, name)
-                mtime, size = _meta_stat(full)
-                if mtime == 0:
-                    try:
-                        st = os.stat(full)
-                        mtime, size = int(st.st_mtime), int(st.st_size)
-                    except OSError:
-                        continue
-                out.append((full, mtime, size))
+                stat = index_stat(full)
+                if stat is not None:
+                    out.append((full, *stat))
     return out
 
 
