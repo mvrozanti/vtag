@@ -28,7 +28,8 @@ function toast(msg, ms = 2200) {
 
 function updateNav(hash) {
   navEl.querySelectorAll('a[data-route]').forEach(a => {
-    a.classList.toggle('active', a.dataset.route === hash);
+    if (a.dataset.route === hash) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
   });
 }
 
@@ -47,7 +48,7 @@ async function route() {
   }
   updateNav(hash);
   await teardownView();
-  viewEl.innerHTML = '<div class="loading">loading…</div>';
+  viewEl.innerHTML = '<div class="mv-empty">loading…</div>';
   const mod = ROUTES[hash];
   try {
     await mod.render(viewEl, { ctx, toast });
@@ -55,10 +56,8 @@ async function route() {
     console.error(`view ${hash} render failed`, err);
     viewEl.innerHTML = '';
     const e = document.createElement('div');
-    e.className = 'empty';
-    const h = document.createElement('h2'); h.textContent = 'view failed to render';
-    const p = document.createElement('p'); p.textContent = String(err && err.message || err);
-    e.append(h, p);
+    e.className = 'mv-empty';
+    e.textContent = `view failed to render: ${String(err && err.message || err)}`;
     viewEl.appendChild(e);
   }
   currentView = mod;
@@ -84,21 +83,21 @@ async function refreshHeader() {
     getJSON('/api/status').catch(() => ({ body: null })),
     getJSON('/api/cache_meta').catch(() => ({ body: null })),
   ]);
+  const dot = runPill.querySelector('.mv-dot');
+  const label = runPill.querySelector('.vt-run__label');
   if (status.body) {
     const running = !!status.body.running;
-    runPill.querySelector('.dot').className = 'dot ' + (running ? 'on' : 'off');
-    runPill.lastChild.textContent = running ? 'running' : 'idle';
+    dot.className = 'mv-dot ' + (running ? 'is-ok' : 'is-unknown');
+    label.textContent = running ? 'running' : 'idle';
   } else {
-    runPill.querySelector('.dot').className = 'dot error';
-    runPill.lastChild.textContent = 'unreachable';
+    dot.className = 'mv-dot is-down';
+    label.textContent = 'offline';
   }
   if (meta.body) {
     cacheMeta = meta.body;
     const reindexing = !!(meta.body.reindex && meta.body.reindex.running);
-    const has = meta.body.db_exists && meta.body.count > 0;
-    cachePill.className = 'cache-pill ' + (reindexing ? 'reindexing' : (has ? 'ok' : 'empty'));
     const count = meta.body.count || 0;
-    cachePill.textContent = reindexing ? 'cache: reindexing…' : `cache: ${count.toLocaleString()}`;
+    cachePill.textContent = reindexing ? 'reindexing…' : (meta.body.db_exists && count ? `${count.toLocaleString()} indexed` : 'no index');
   }
 }
 

@@ -1,4 +1,4 @@
-import { getJSON, postJSON, thumbUrl } from '../api.js';
+import { getJSON, thumbUrl } from '../api.js';
 
 const PAGE_SIZE = 120;
 const PREFETCH_PX = 1200;
@@ -26,40 +26,38 @@ const VALID_TYPES = ['', 'meme', 'photo', 'screenshot_text', 'screenshot_app', '
 const MEDIA_KINDS = ['', 'image', 'video'];
 
 function cardEl(item, ctx) {
-  const card = el('div', { cls: item.fuzzy ? 'card fuzzy' : 'card', attrs: { 'data-sha': item.sha, tabindex: '0' } });
-  const thumb = el('div', { cls: 'thumb loading' });
+  const card = el('div', { cls: item.fuzzy ? 'vt-card is-fuzzy' : 'vt-card', attrs: { 'data-sha': item.sha, tabindex: '0', role: 'button', 'aria-label': item.basename } });
+  const thumb = el('div', { cls: 'vt-thumb is-loading' });
   if (item.sha) {
     const url = thumbUrl(item.sha);
-    thumb.style.backgroundImage = `url("${url}")`;
     const probe = new Image();
-    probe.onload = () => thumb.classList.remove('loading');
+    probe.onload = () => {
+      thumb.style.backgroundImage = `url("${url}")`;
+      thumb.classList.remove('is-loading');
+    };
     probe.onerror = () => {
-      thumb.classList.remove('loading');
-      thumb.classList.add('placeholder');
-      thumb.style.backgroundImage = '';
-      thumb.textContent = (item.format || 'no thumb').toLowerCase();
+      thumb.classList.remove('is-loading');
+      thumb.classList.add('is-missing');
+      thumb.textContent = (item.format || 'no preview').toLowerCase();
     };
     probe.src = url;
   }
   if (item.content_type && item.content_type !== 'other') {
-    thumb.appendChild(el('span', { cls: 'badge', text: item.content_type.replace('_', ' ') }));
+    thumb.appendChild(el('span', { cls: 'vt-badge', text: item.content_type.replace('_', ' ') }));
   }
   if (item.media === 'video') {
-    thumb.appendChild(el('span', { cls: 'badge video', text: 'video' }));
+    thumb.appendChild(el('span', { cls: 'vt-badge is-video', text: '▶ video' }));
   }
   if (item.fuzzy) {
-    thumb.appendChild(el('span', { cls: 'badge fuzzy', text: '~ name', attrs: { title: 'fuzzy filename match' } }));
+    thumb.appendChild(el('span', { cls: 'vt-badge is-fuzzy', text: '~ name', attrs: { title: 'fuzzy filename match' } }));
   }
   card.appendChild(thumb);
-  const meta = el('div', { cls: 'meta' });
-  meta.appendChild(el('div', { cls: 'name', text: item.basename, attrs: { title: item.path } }));
-  const tagsEl = el('div', { cls: 'tags' });
-  if (item.tags_top && item.tags_top.length) {
-    tagsEl.textContent = item.tags_top.slice(0, 5).join(' · ');
-  } else {
-    tagsEl.textContent = item.tagged === false ? '(untagged)' : '(no tags)';
-  }
-  meta.appendChild(tagsEl);
+  const meta = el('div', { cls: 'vt-meta' });
+  meta.appendChild(el('div', { cls: 'vt-name', text: item.basename, attrs: { title: item.path } }));
+  const tags = item.tags_top && item.tags_top.length
+    ? item.tags_top.slice(0, 5).join(' · ')
+    : (item.tagged === false ? 'untagged' : 'no tags');
+  meta.appendChild(el('div', { cls: 'vt-tags', text: tags }));
   card.appendChild(meta);
   card.addEventListener('click', () => ctx.openPanel(item.sha));
   card.addEventListener('keydown', (e) => {
@@ -111,11 +109,8 @@ async function runSearch(grid, status, sentinel, query, contentType, media, ctx)
   window.scrollTo(0, 0);
   if (!body.cache_available) {
     current = null;
-    status.textContent = '0 match';
-    const e = el('div', { cls: 'empty' });
-    e.appendChild(el('h2', { text: 'no cache' }));
-    e.appendChild(el('p', { text: 'No index yet — hit reindex in the toolbar above.' }));
-    grid.appendChild(e);
+    status.textContent = 'no index';
+    grid.appendChild(el('div', { cls: 'mv-empty', text: 'no index yet · build one from the run tab' }));
     return;
   }
   const total = body.total || 0;
@@ -125,73 +120,86 @@ async function runSearch(grid, status, sentinel, query, contentType, media, ctx)
   appendPage(state, body.items || []);
   state.loading = false;
   if (total === 0) {
-    const none = el('div', { cls: 'empty' });
-    none.appendChild(el('p', { text: 'no matches' }));
-    grid.appendChild(none);
+    grid.appendChild(el('div', { cls: 'mv-empty', text: 'no matches' }));
     return;
   }
   if (nearBottom(sentinel)) loadMore(sentinel);
 }
 
+function chipRow(label, values, initial, onPick) {
+  let value = initial;
+  const chips = values.map((v) => {
+    const c = el('button', { cls: 'mv-chip', text: v ? v.replace('_', ' ') : 'all', attrs: { type: 'button', 'aria-pressed': String(v === value) } });
+    c.addEventListener('click', () => {
+      value = v;
+      chips.forEach((x, i) => x.setAttribute('aria-pressed', String(values[i] === value)));
+      onPick(value);
+    });
+    return c;
+  });
+  return { chips, get: () => value };
+}
+
 export async function render(container, { ctx }) {
   container.innerHTML = '';
 
-  const toolbar = el('div', { cls: 'view-toolbar' });
   const initial = sessionStorage.getItem('vtag.search.q') || '';
   sessionStorage.removeItem('vtag.search.q');
   const fromTag = sessionStorage.getItem('vtag.search.from') === 'tag';
   sessionStorage.removeItem('vtag.search.from');
 
-  const input = el('input', { attrs: { type: 'search', placeholder: 'tag, label, filename (fuzzy: pepefrog, japburro) — or: pepe AND (smug OR angry) NOT politics', id: 'search-q', value: initial } });
-  input.style.minWidth = '20rem';
+  const toolbar = el('div', { cls: 'vt-toolbar' });
+  const input = el('input', { cls: 'mv-search', attrs: {
+    type: 'search', id: 'search-q', value: initial, enterkeyhint: 'search', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
+    placeholder: 'tags, labels, filenames…', 'aria-label': 'search',
+    title: 'fuzzy filenames work (pepefrog); combine with AND, OR, NOT and parentheses',
+  } });
   toolbar.appendChild(input);
-
-  toolbar.appendChild(el('span', { cls: 'label', text: 'type' }));
-  const select = el('select');
-  VALID_TYPES.forEach(t => select.appendChild(el('option', { attrs: { value: t }, text: t || 'all' })));
-  toolbar.appendChild(select);
-
-  toolbar.appendChild(el('span', { cls: 'label', text: 'media' }));
-  const mediaSelect = el('select');
-  MEDIA_KINDS.forEach(k => mediaSelect.appendChild(el('option', { attrs: { value: k }, text: k || 'all' })));
-  toolbar.appendChild(mediaSelect);
-
-  const reindexBtn = el('button', { text: 'reindex' });
-  reindexBtn.addEventListener('click', async () => {
-    const r = await postJSON('/api/reindex');
-    if (r.status === 202) ctx.toast('reindex started');
-    else if (r.status === 409) ctx.toast('reindex already running');
-    else ctx.toast(r.body?.error || 'reindex failed');
-  });
-  toolbar.appendChild(reindexBtn);
-
-  toolbar.appendChild(el('span', { cls: 'grow' }));
-  const status = el('span', { cls: 'label', id: 'search-status', text: 'loading…' });
-  toolbar.appendChild(status);
   container.appendChild(toolbar);
 
-  const grid = el('div', { cls: 'card-grid' });
+  const filters = el('div', { cls: 'vt-filters' });
+  const types = chipRow('content type', VALID_TYPES, '', () => query());
+  let mediaValue = '';
+  const mediaChips = MEDIA_KINDS.filter(Boolean).map((kind) => {
+    const c = el('button', { cls: 'mv-chip', text: kind, attrs: { type: 'button', 'aria-pressed': 'false' } });
+    c.addEventListener('click', () => {
+      mediaValue = mediaValue === kind ? '' : kind;
+      mediaChips.forEach(x => x.setAttribute('aria-pressed', String(x.textContent === mediaValue)));
+      query();
+    });
+    return c;
+  });
+  const row = el('div', { cls: 'mv-chips', attrs: { role: 'group', 'aria-label': 'filters' } });
+  mediaChips.forEach(c => row.appendChild(c));
+  row.appendChild(el('span', { cls: 'vt-chip-sep', attrs: { 'aria-hidden': 'true' } }));
+  types.chips.forEach(c => row.appendChild(c));
+  filters.appendChild(row);
+  container.appendChild(filters);
+
+  const statusRow = el('div', { cls: 'vt-status' });
+  const status = el('span', { cls: 'mv-label', id: 'search-status', text: 'loading…' });
+  statusRow.appendChild(status);
+  container.appendChild(statusRow);
+
+  const grid = el('div', { cls: 'vt-grid' });
   container.appendChild(grid);
-  const sentinel = el('div', { cls: 'sentinel' });
+  const sentinel = el('div', { cls: 'vt-sentinel' });
   container.appendChild(sentinel);
   observer = new IntersectionObserver((entries) => {
     if (entries.some(e => e.isIntersecting)) loadMore(sentinel);
   }, { rootMargin: `0px 0px ${PREFETCH_PX}px 0px` });
   observer.observe(sentinel);
 
-  const query = () => runSearch(grid, status, sentinel, input.value.trim(), select.value, mediaSelect.value, ctx);
+  const query = () => runSearch(grid, status, sentinel, input.value.trim(), types.get(), mediaValue, ctx);
   function schedule() {
     clearTimeout(timer);
     timer = setTimeout(query, DEBOUNCE_MS);
   }
   input.addEventListener('input', schedule);
-  select.addEventListener('change', query);
-  mediaSelect.addEventListener('change', query);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
   await query();
 
-  if (fromTag && !document.activeElement?.tagName?.match(/INPUT|SELECT/)) {
-    // tag click came from panel: leave focus where it was so user keeps reading
-  } else {
+  if (!fromTag && matchMedia('(pointer: fine)').matches) {
     input.focus();
     input.select();
   }

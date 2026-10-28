@@ -25,6 +25,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from urllib.request import urlopen
 
 from webui import cache as webui_cache
 from webui import thumbs as webui_thumbs
@@ -58,6 +59,7 @@ TARGET_DIR = Path(os.getenv("VTAG_HUB_TARGET_DIR", "")).expanduser()
 BROWSE_ROOTS = (TARGET_DIR.resolve(),) if os.getenv("VTAG_HUB_TARGET_DIR", "").strip() else ()
 VTAG_BIN = os.getenv("VTAG_HUB_VTAG_BIN", "vtag")
 HUB_TOKEN = os.getenv("VTAG_HUB_TOKEN", "").strip()
+THEME_URL = os.getenv("VTAG_THEME_URL", "http://127.0.0.1:6684/api/theme?colors=1").strip()
 STATE_DIR = Path(os.getenv("VTAG_STATE_DIR", str(Path.home() / ".local/share/vtag")))
 LOG_DIR = Path(os.getenv("VTAG_LOG_DIR", str(STATE_DIR / "logs")))
 STATE_FILE = STATE_DIR / "run-state.json"
@@ -492,6 +494,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_theme(self) -> None:
+        if not THEME_URL:
+            self._bytes(HTTPStatus.NO_CONTENT, b"", "application/json")
+            return
+        try:
+            with urlopen(THEME_URL, timeout=2) as r:
+                body = r.read(65536)
+            json.loads(body)
+        except (OSError, ValueError):
+            self._bytes(HTTPStatus.NO_CONTENT, b"", "application/json")
+            return
+        self._bytes(HTTPStatus.OK, body, "application/json")
+
     def _serve_static(self, rel_path: str) -> None:
         rel_path = rel_path.lstrip("/")
         if not rel_path:
@@ -677,6 +692,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/healthz":
             self._json(HTTPStatus.OK, {"ok": True})
+            return
+        if path == "/api/theme":
+            self._serve_theme()
             return
         if path == "/api/status":
             self._json(HTTPStatus.OK, _status())

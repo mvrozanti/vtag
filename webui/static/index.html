@@ -2,28 +2,34 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>vtag · mvr.ac</title>
+<link rel="stylesheet" href="/static/theme.css">
+<link rel="stylesheet" href="/static/components.css">
 <link rel="stylesheet" href="/static/style.css">
+<script src="/static/theme.js" data-endpoint="/api/theme" data-poll="0"></script>
 </head>
 <body>
-<header>
-  <h1><span class="brand">vtag</span><span class="cursor">_</span></h1>
-  <nav id="nav">
-    <a href="https://hub.mvr.ac/" class="exit">← hub</a>
-    <a href="#/search" data-route="#/search">search</a>
-    <a href="#/runner" data-route="#/runner">run</a>
-  </nav>
-  <div class="state">
-    <span class="cache-pill" id="cache-pill" title="vfind cache">cache: …</span>
-    <span class="run-pill" id="run-pill" title="run state"><span class="dot off"></span>idle</span>
+<header class="vt-head">
+  <div class="mv-topbar vt-bar">
+    <span class="mv-topbar__name"><span class="brand">vtag</span></span>
+    <nav class="mv-tabs vt-tabs" id="nav" aria-label="sections">
+      <a class="mv-tabs__tab" href="#/search" data-route="#/search">search</a>
+      <a class="mv-tabs__tab" href="#/runner" data-route="#/runner">run</a>
+    </nav>
+    <span class="mv-topbar__user">
+      <span class="mv-topbar__count" id="cache-pill" title="indexed files">…</span>
+      <span class="vt-run" id="run-pill" title="tagging run"><span class="mv-dot is-unknown"></span><span class="vt-run__label">idle</span></span>
+      <a href="https://hub.mvr.ac/">hub</a>
+    </span>
   </div>
 </header>
-<main id="view"><div class="loading">loading…</div></main>
-<aside id="panel" hidden aria-hidden="true">
-  <div class="panel-inner" id="panel-inner"></div>
+<main id="view"><div class="mv-empty">loading…</div></main>
+<aside id="panel" class="vt-sheet" hidden aria-hidden="true" aria-label="item">
+  <div class="vt-sheet__inner" id="panel-inner"></div>
 </aside>
-<div id="toast" hidden></div>
+<div id="toast" class="vt-toast" role="status" hidden></div>
 <script type="module" src="/static/app.js"></script>
 </body>
 </html>

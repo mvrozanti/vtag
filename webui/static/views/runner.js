@@ -29,52 +29,66 @@ function fmtDuration(s) {
 }
 
 function kvRow(parent, key, value) {
-  parent.appendChild(el('span', { cls: 'k', text: key }));
-  parent.appendChild(el('span', { cls: 'v', text: value || '–' }));
+  parent.appendChild(el('dt', { text: key }));
+  parent.appendChild(el('dd', { text: value || '–' }));
+}
+
+function box(title, aside, ...children) {
+  const b = el('section', { cls: 'vt-box' });
+  const h = el('div', { cls: 'vt-box__head' }, el('h3', { cls: 'mv-label', text: title }));
+  if (aside) h.appendChild(aside);
+  b.appendChild(h);
+  children.forEach(c => c && b.appendChild(c));
+  return b;
 }
 
 export async function render(container, { ctx }) {
   container.innerHTML = '';
+  const wrap = el('div', { cls: 'vt-runner' });
+  container.appendChild(wrap);
 
-  const controls = el('div', { cls: 'runner-controls' });
   const targetInput = el('input', {
-    cls: 'runner-target',
-    attrs: { type: 'text', placeholder: 'target dir (blank = default)', spellcheck: 'false' },
+    cls: 'mv-input',
+    attrs: { type: 'text', id: 'r-target', placeholder: 'default target directory', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', enterkeyhint: 'go' },
   });
-  const btnStart = el('button', { cls: 'primary', text: 'start run' });
-  const btnStop = el('button', { cls: 'danger', text: 'stop run', attrs: { disabled: '' } });
-  const btnRefresh = el('button', { text: 'refresh' });
-  controls.append(targetInput, btnStart, btnStop, btnRefresh);
-  container.appendChild(controls);
+  wrap.appendChild(el('label', { cls: 'mv-field vt-field', attrs: { for: 'r-target' } },
+    el('span', { cls: 'mv-label', text: 'target' }),
+    targetInput,
+    el('span', { cls: 'mv-field__hint', text: 'blank tags the default directory recursively' }),
+  ));
+
+  const btnStart = el('button', { cls: 'mv-btn is-primary', text: 'start run', attrs: { type: 'button' } });
+  const btnStop = el('button', { cls: 'mv-btn is-danger', text: 'stop run', attrs: { type: 'button', disabled: '' } });
+  const btnRefresh = el('button', { cls: 'mv-btn', text: 'refresh', attrs: { type: 'button' } });
+  const btnReindex = el('button', { cls: 'mv-btn', text: 'reindex search', attrs: { type: 'button' } });
+  wrap.appendChild(el('div', { cls: 'vt-actions' }, btnStart, btnStop, btnRefresh, btnReindex));
   let targetDirty = false;
   targetInput.addEventListener('input', () => { targetDirty = true; });
 
-  const grid = el('div', { cls: 'runner-grid' });
+  const meter = el('div', { cls: 'mv-meter' },
+    el('span', { cls: 'mv-meter__label', text: 'done' }),
+    el('span', { cls: 'mv-meter__track' }, el('span', { cls: 'mv-meter__fill', id: 'r-bar', attrs: { style: 'width:0%' } })),
+    el('span', { cls: 'mv-meter__value', id: 'r-pct', text: '–' }),
+  );
+  const progressKV = el('dl', { cls: 'vt-kv', id: 'r-progress-kv' });
+  wrap.appendChild(box('progress', el('span', { cls: 'mv-pill', id: 'r-state', text: '…' }), meter, progressKV));
 
-  const progressCard = el('div', { cls: 'runner-card' });
-  progressCard.appendChild(el('h3', {}, 'progress', el('span', { id: 'r-state', cls: 'v', text: '…' })));
-  const bar = el('div', { cls: 'bar-track' }, el('span', { cls: 'bar-fill', id: 'r-bar', attrs: { style: 'width:0%' } }));
-  progressCard.appendChild(bar);
-  const progressKV = el('div', { cls: 'kv', id: 'r-progress-kv' });
-  progressCard.appendChild(progressKV);
+  const runKV = el('dl', { cls: 'vt-kv', id: 'r-run-kv' });
+  wrap.appendChild(box('run', null, runKV));
 
-  const runCard = el('div', { cls: 'runner-card' });
-  runCard.appendChild(el('h3', { text: 'run' }));
-  const runKV = el('div', { cls: 'kv', id: 'r-run-kv' });
-  runCard.appendChild(runKV);
+  const logPre = el('pre', { cls: 'vt-log', id: 'r-log', text: '(loading)' });
+  const logBox = box('log tail', el('span', { cls: 'mv-field__hint', id: 'r-log-name', text: '' }), logPre);
+  logBox.classList.add('is-wide');
+  wrap.appendChild(logBox);
 
-  grid.append(progressCard, runCard);
-  container.appendChild(grid);
-
-  const logCard = el('div', { cls: 'runner-card' });
-  logCard.style.marginTop = '1rem';
-  logCard.appendChild(el('h3', {},
-    'log tail',
-    el('span', { cls: 'v', id: 'r-log-name', text: '' }),
-  ));
-  const logPre = el('pre', { cls: 'log-pre', id: 'r-log', text: '(loading)' });
-  logCard.appendChild(logPre);
-  container.appendChild(logCard);
+  btnReindex.addEventListener('click', async () => {
+    btnReindex.disabled = true;
+    const r = await postJSON('/api/reindex');
+    if (r.status === 202) ctx.toast('reindex started');
+    else if (r.status === 409) ctx.toast('reindex already running');
+    else ctx.toast(r.body?.error || 'reindex failed');
+    btnReindex.disabled = false;
+  });
 
   async function refresh() {
     const [s, txt] = await Promise.all([
@@ -83,7 +97,9 @@ export async function render(container, { ctx }) {
     ]);
     const st = s.body || {};
     const running = !!st.running;
-    document.getElementById('r-state').textContent = running ? 'running' : 'idle';
+    const stateEl = document.getElementById('r-state');
+    stateEl.textContent = running ? 'running' : 'idle';
+    stateEl.className = 'mv-pill' + (running ? ' is-ok' : '');
     btnStart.disabled = running;
     btnStop.disabled = !running;
     targetInput.disabled = running;
@@ -96,6 +112,7 @@ export async function render(container, { ctx }) {
     const total = st.total_count || 0;
     const pct = total > 0 ? Math.round(100 * tagged / total) : 0;
     document.getElementById('r-bar').style.width = pct + '%';
+    document.getElementById('r-pct').textContent = total ? `${pct}%` : '–';
 
     progressKV.innerHTML = '';
     kvRow(progressKV, 'tagged', total ? `${tagged.toLocaleString()} / ${total.toLocaleString()} (${pct}%)${st.scan_in_flight ? ' · scanning' : ''}` : (st.scan_in_flight ? 'scanning…' : '–'));
@@ -118,11 +135,11 @@ export async function render(container, { ctx }) {
     document.getElementById('r-log-name').textContent = st.log ? st.log.split('/').pop() : '';
     if (txt) {
       logPre.textContent = txt;
-      logPre.classList.remove('empty');
+
       logPre.scrollTop = logPre.scrollHeight;
     } else {
       logPre.textContent = '(no log)';
-      logPre.classList.add('empty');
+
     }
   }
 
