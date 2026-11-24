@@ -2,7 +2,7 @@
 
 GET  /               HTML status page
 GET  /api/status     JSON: active pid, progress, last result, target dir
-POST /api/start      start a recursive tag run for VTAG_HUB_TARGET_DIR
+POST /api/start      tag everything untagged in the library, or one folder inside it
 POST /api/stop       SIGTERM the active run (and its process group)
 GET  /api/log        plain-text tail of the active (or most recent) log
 """
@@ -55,8 +55,18 @@ _reindex_lock = threading.Lock()
 
 HOST = os.getenv("VTAG_HUB_LISTEN_HOST", "127.0.0.1")
 PORT = int(os.getenv("VTAG_HUB_LISTEN_PORT", "8093"))
-TARGET_DIR = Path(os.getenv("VTAG_HUB_TARGET_DIR", "")).expanduser()
-BROWSE_ROOTS = (TARGET_DIR.resolve(),) if os.getenv("VTAG_HUB_TARGET_DIR", "").strip() else ()
+
+
+def _library_roots() -> tuple[Path, ...]:
+    raw = os.getenv("VTAG_SEARCH_ROOTS", "").strip() or os.getenv("VTAG_HUB_TARGET_DIR", "").strip()
+    roots: dict[Path, None] = {}
+    for part in raw.split(os.pathsep):
+        if part.strip():
+            roots[Path(part.strip()).expanduser().resolve()] = None
+    return tuple(roots)
+
+
+ROOTS = _library_roots()
 VTAG_BIN = os.getenv("VTAG_HUB_VTAG_BIN", "vtag")
 HUB_TOKEN = os.getenv("VTAG_HUB_TOKEN", "").strip()
 THEME_URL = os.getenv("VTAG_THEME_URL", "http://127.0.0.1:6684/api/theme?colors=1").strip()
@@ -69,95 +79,8 @@ PROGRESS_RE = re.compile(r"\[(\d+)/(\d+)\]\s+(OK|FAIL|SKIP)\b")
 OK_TIME_RE = re.compile(r"\[(\d+)/(\d+)\]\s+OK\s+([\d.]+)s\b")
 DONE_RE = re.compile(r"done:\s+(\d+)\s+tagged,\s+(\d+)\s+skipped,\s+(\d+)\s+failed\s+\(total\s+(\d+)\)")
 
-EXIFTOOL_CONFIG = Path(__file__).resolve().parent / "pipeline" / "exiftool_config.pl"
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff", ".tif",
-              ".mp4", ".mov", ".mkv", ".webm"}
-SCAN_TTL_SECONDS = 600.0
-
-_scan_cache = {"tagged": 0, "total": 0, "at": 0.0, "scanning": False}
-_scan_lock = threading.Lock()
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _count_images_under(root: Path) -> int:
-    total = 0
-    for dirpath, _dirs, files in os.walk(root):
-        for name in files:
-            if os.path.splitext(name)[1].lower() in IMAGE_EXTS:
-                total += 1
-    return total
-
-
-def _scan_target_blocking() -> None:
-    if not TARGET_DIR or not TARGET_DIR.exists():
-        with _scan_lock:
-            _scan_cache.update(scanning=False)
-        return
-    et = shutil.which("exiftool")
-    if not et:
-        with _scan_lock:
-            _scan_cache.update(scanning=False)
-        return
-    started = time.time()
-    try:
-        total = _count_images_under(TARGET_DIR)
-        ext_args: list[str] = []
-        for ext in IMAGE_EXTS:
-            ext_args += ["-ext", ext.lstrip(".")]
-        # One recursive exiftool invocation lets exiftool stream reads + filter
-        # in a single process — much faster than chunking the file list through
-        # python+subprocess on an HDD under concurrent vtag-tag load.
-        result = subprocess.run(
-            [
-                et, "-config", str(EXIFTOOL_CONFIG),
-                "-r", "-q", "-q",
-                *ext_args,
-                "-if", "$XMP-vtag:Payload",
-                "-p", ".",
-                str(TARGET_DIR),
-            ],
-            capture_output=True,
-            timeout=900,
-        )
-        tagged = result.stdout.count(b".\n")
-        # mkv/webm cannot carry embedded XMP — their payload lives in a
-        # sibling `<name>.xmp` sidecar. One sidecar with payload = one tagged
-        # matroska media file.
-        sidecar_result = subprocess.run(
-            [
-                et, "-config", str(EXIFTOOL_CONFIG),
-                "-r", "-q", "-q",
-                "-ext", "xmp",
-                "-if", "$XMP-vtag:Payload",
-                "-p", ".",
-                str(TARGET_DIR),
-            ],
-            capture_output=True,
-            timeout=900,
-        )
-        tagged += sidecar_result.stdout.count(b".\n")
-        with _scan_lock:
-            _scan_cache.update(tagged=tagged, total=total, at=time.time(), scanning=False)
-        log.info("scan: %d tagged / %d total in %.1fs", tagged, total, time.time() - started)
-    except Exception as exc:
-        log.warning("scan failed after %.1fs: %s", time.time() - started, exc)
-        with _scan_lock:
-            _scan_cache["scanning"] = False
-
-
-def _kick_scan_if_stale() -> None:
-    """Launch a background scan if cache is empty or older than SCAN_TTL_SECONDS."""
-    with _scan_lock:
-        if _scan_cache["scanning"]:
-            return
-        age = time.time() - _scan_cache["at"]
-        if _scan_cache["at"] > 0 and age < SCAN_TTL_SECONDS:
-            return
-        _scan_cache["scanning"] = True
-    threading.Thread(target=_scan_target_blocking, daemon=True).start()
 
 
 def _read_state() -> dict:
@@ -256,46 +179,20 @@ def _status() -> dict:
     log_file = Path(log_path) if log_path else _latest_log()
     progress = _scan_log(log_file) if log_file else {}
 
-    _kick_scan_if_stale()
-    with _scan_lock:
-        scan_tagged = int(_scan_cache["tagged"])
-        scan_total = int(_scan_cache["total"])
-        scan_at = float(_scan_cache["at"])
-        scan_in_flight = bool(_scan_cache["scanning"])
-
-    log_n = int(progress.get("last_n", 0)) if progress else 0
-    log_total = int(progress.get("last_total", 0)) if progress else 0
-    log_eta = progress.get("eta_seconds") if progress else None
-    done = progress.get("done") if progress else None
-    scan_ready = scan_at > 0
-
-    if done:
-        tagged_now: int | None = int(done.get("tagged", 0)) + int(done.get("skipped", 0))
-        total_now = int(done.get("total", 0)) or (log_total or scan_total)
-        eta_seconds = 0
-    elif log_total > 0:
-        tagged_now = log_n
-        total_now = log_total
-        eta_seconds = int(log_eta) if log_eta is not None else 0
-    elif scan_ready:
-        tagged_now = min(scan_total, scan_tagged) if scan_total else scan_tagged
-        total_now = scan_total
-        avg = progress.get("avg_seconds") if progress else None
-        untagged_for_eta = max(0, total_now - tagged_now)
-        eta_seconds = int(untagged_for_eta * avg) if (avg and untagged_for_eta) else 0
-    else:
-        tagged_now = None
-        total_now = scan_total
-        eta_seconds = 0
-
-    untagged = max(0, total_now - tagged_now) if tagged_now is not None else 0
+    snap = webui_cache.snapshot(ROOTS)
+    meta = snap.meta() if snap else {"count": 0, "tagged": 0}
+    total_now = int(meta["count"])
+    tagged_now = int(meta["tagged"])
+    untagged = max(0, total_now - tagged_now)
+    eta_seconds = int(progress.get("eta_seconds") or 0) if (running and progress) else 0
 
     active_target = state.get("target_dir") if running else None
 
     return {
         "running": running,
         "pid": pid if running else None,
-        "target_dir": active_target or (str(TARGET_DIR) if TARGET_DIR else None),
+        "target_dir": active_target,
+        "roots": [str(r) for r in ROOTS],
         "log": str(log_file) if log_file else None,
         "started_at": state.get("started_at"),
         "stopped_at": None if running else state.get("stopped_at"),
@@ -303,41 +200,34 @@ def _status() -> dict:
         "tagged_count": tagged_now,
         "total_count": total_now,
         "untagged_count": untagged,
-        "scan_at": scan_at,
-        "scan_in_flight": scan_in_flight,
         "eta_seconds": eta_seconds,
         "vtag_bin": VTAG_BIN,
     }
 
 
-def _within_target_root(candidate: Path) -> bool:
-    """A caller-supplied target is only honored if it resolves inside the
-    configured VTAG_HUB_TARGET_DIR. Without this an unauthenticated
-    POST /api/start could launch a destructive recursive re-tag (in-place
-    exiftool -overwrite_original) over any directory on the host."""
-    if not TARGET_DIR:
-        return False
+def _within_library(candidate: Path) -> bool:
+    """A caller-supplied target is only honored if it resolves inside one of
+    the library roots. Without this an unauthenticated POST /api/start could
+    launch a recursive re-tag (in-place exiftool -overwrite_original) over
+    any directory on the host."""
     try:
-        root = TARGET_DIR.resolve()
         cand = candidate.resolve()
     except OSError:
         return False
-    return cand == root or root in cand.parents
+    return any(cand == root or root in cand.parents for root in ROOTS)
 
 
 def _start(target: Path | None = None) -> tuple[int, dict]:
-    if target is not None and not _within_target_root(target):
-        return HTTPStatus.FORBIDDEN, {
-            "error": "target must be inside VTAG_HUB_TARGET_DIR",
-            "target_root": str(TARGET_DIR) if TARGET_DIR else None,
-        }
-    target = target or TARGET_DIR
-    if not target or not target.exists():
-        return HTTPStatus.BAD_REQUEST, {
-            "error": f"target not set or does not exist: {target!s}"
-        }
-    if not target.is_dir():
-        return HTTPStatus.BAD_REQUEST, {"error": f"target is not a directory: {target!s}"}
+    if target is not None:
+        if not _within_library(target):
+            return HTTPStatus.FORBIDDEN, {
+                "error": "target must be inside a library root",
+                "roots": [str(r) for r in ROOTS],
+            }
+        if not target.is_dir():
+            return HTTPStatus.BAD_REQUEST, {"error": f"target is not a directory: {target!s}"}
+    elif not ROOTS:
+        return HTTPStatus.BAD_REQUEST, {"error": "no library roots configured (VTAG_SEARCH_ROOTS)"}
     state = _read_state()
     if state.get("pid") and _pid_alive(int(state["pid"])):
         return HTTPStatus.CONFLICT, {"error": "run already active", "pid": state["pid"]}
@@ -348,7 +238,14 @@ def _start(target: Path | None = None) -> tuple[int, dict]:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = LOG_DIR / f"run-{stamp}.log"
 
-    cmd = [VTAG_BIN, "tag", "-r", str(target)]
+    if target is None:
+        cmd = [VTAG_BIN, "tag", "--untagged"]
+        label = "untagged under " + ", ".join(str(r) for r in ROOTS)
+    else:
+        cmd = [VTAG_BIN, "tag", "-r", str(target)]
+        label = str(target)
+    env = os.environ.copy()
+    env["VTAG_SEARCH_ROOTS"] = os.pathsep.join(str(r) for r in ROOTS)
     fh = log_path.open("w")
     proc = subprocess.Popen(
         cmd,
@@ -356,6 +253,7 @@ def _start(target: Path | None = None) -> tuple[int, dict]:
         stderr=subprocess.STDOUT,
         start_new_session=True,
         close_fds=True,
+        env=env,
     )
 
     new_state = {
@@ -363,7 +261,7 @@ def _start(target: Path | None = None) -> tuple[int, dict]:
         "pgid": proc.pid,
         "log": str(log_path),
         "cmd": cmd,
-        "target_dir": str(target),
+        "target_dir": label,
         "started_at": _now_iso(),
         "stopped_at": None,
     }
@@ -430,9 +328,7 @@ def _reindex_start() -> tuple[int, dict]:
     if not FIND_SCRIPT.exists():
         return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"find.py not found at {FIND_SCRIPT}"}
     env = os.environ.copy()
-    roots = env.get("VTAG_SEARCH_ROOTS")
-    if not roots and TARGET_DIR:
-        env["VTAG_SEARCH_ROOTS"] = str(TARGET_DIR)
+    env["VTAG_SEARCH_ROOTS"] = os.pathsep.join(str(r) for r in ROOTS)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     log_path = LOG_DIR / f"reindex-{stamp}.log"
@@ -531,14 +427,14 @@ class Handler(BaseHTTPRequestHandler):
         self._bytes(HTTPStatus.OK, data, ctype, cache="no-cache, must-revalidate")
 
     def _lookup(self, doc_id: str) -> webui_cache.Doc | None:
-        snap = webui_cache.snapshot(BROWSE_ROOTS)
+        snap = webui_cache.snapshot(ROOTS)
         if snap is None:
             self._json(HTTPStatus.NOT_FOUND, {"error": "cache not built"})
             return None
         doc = snap.get(doc_id)
         if doc is not None and not webui_cache.unchanged(doc):
             webui_cache.invalidate()
-            snap = webui_cache.snapshot(BROWSE_ROOTS)
+            snap = webui_cache.snapshot(ROOTS)
             doc = snap.get(doc_id) if snap is not None else None
         if doc is None:
             self._json(HTTPStatus.NOT_FOUND, {"error": "sha not in cache"})
@@ -649,7 +545,7 @@ class Handler(BaseHTTPRequestHandler):
         query = qs.get("q", [""])[0] or ""
         content_type = qs.get("type", [None])[0]
         media = qs.get("media", [None])[0]
-        snap = webui_cache.snapshot(BROWSE_ROOTS)
+        snap = webui_cache.snapshot(ROOTS)
         if snap is None:
             self._json(HTTPStatus.OK, {"cache_available": False, "items": [], "total": 0, "fuzzy": 0})
             return
@@ -676,7 +572,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.OK, {"path": doc.path, "payload": doc.payload, "tagged": doc.payload is not None})
 
     def _serve_cache_meta(self) -> None:
-        snap = webui_cache.snapshot(BROWSE_ROOTS)
+        snap = webui_cache.snapshot(ROOTS)
         meta = snap.meta() if snap else {"db_exists": False, "count": 0, "tagged": 0, "last_mtime": 0}
         meta["reindex"] = _reindex_status()
         self._json(HTTPStatus.OK, meta)
@@ -777,8 +673,8 @@ def main() -> int:
     )
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log.info("vtag-server listening on %s:%d (target=%s)", HOST, PORT, TARGET_DIR or "<unset>")
-    threading.Thread(target=webui_cache.snapshot, args=(BROWSE_ROOTS,), daemon=True).start()
+    log.info("vtag-server listening on %s:%d (roots=%s)", HOST, PORT, os.pathsep.join(map(str, ROOTS)) or "<unset>")
+    threading.Thread(target=webui_cache.snapshot, args=(ROOTS,), daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         srv.serve_forever()

@@ -49,12 +49,12 @@ export async function render(container, { ctx }) {
 
   const targetInput = el('input', {
     cls: 'mv-input',
-    attrs: { type: 'text', id: 'r-target', placeholder: 'default target directory', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', enterkeyhint: 'go' },
+    attrs: { type: 'text', id: 'r-target', placeholder: 'a folder inside the library (optional)', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', enterkeyhint: 'go' },
   });
   wrap.appendChild(el('label', { cls: 'mv-field vt-field', attrs: { for: 'r-target' } },
     el('span', { cls: 'mv-label', text: 'target' }),
     targetInput,
-    el('span', { cls: 'mv-field__hint', text: 'blank tags the default directory recursively' }),
+    el('span', { cls: 'mv-field__hint', text: 'blank tags everything untagged in the library' }),
   ));
 
   const btnStart = el('button', { cls: 'mv-btn is-primary', text: 'start run', attrs: { type: 'button' } });
@@ -62,11 +62,9 @@ export async function render(container, { ctx }) {
   const btnRefresh = el('button', { cls: 'mv-btn', text: 'refresh', attrs: { type: 'button' } });
   const btnReindex = el('button', { cls: 'mv-btn', text: 'reindex search', attrs: { type: 'button' } });
   wrap.appendChild(el('div', { cls: 'vt-actions' }, btnStart, btnStop, btnRefresh, btnReindex));
-  let targetDirty = false;
-  targetInput.addEventListener('input', () => { targetDirty = true; });
 
   const meter = el('div', { cls: 'mv-meter' },
-    el('span', { cls: 'mv-meter__label', text: 'done' }),
+    el('span', { cls: 'mv-meter__label', text: 'tagged' }),
     el('span', { cls: 'mv-meter__track' }, el('span', { cls: 'mv-meter__fill', id: 'r-bar', attrs: { style: 'width:0%' } })),
     el('span', { cls: 'mv-meter__value', id: 'r-pct', text: '–' }),
   );
@@ -103,9 +101,6 @@ export async function render(container, { ctx }) {
     btnStart.disabled = running;
     btnStop.disabled = !running;
     targetInput.disabled = running;
-    if (!targetDirty && document.activeElement !== targetInput) {
-      targetInput.value = st.target_dir && st.target_dir !== '(unset)' ? st.target_dir : '';
-    }
 
     const p = st.progress || {};
     const tagged = st.tagged_count || 0;
@@ -115,7 +110,7 @@ export async function render(container, { ctx }) {
     document.getElementById('r-pct').textContent = total ? `${pct}%` : '–';
 
     progressKV.innerHTML = '';
-    kvRow(progressKV, 'tagged', total ? `${tagged.toLocaleString()} / ${total.toLocaleString()} (${pct}%)${st.scan_in_flight ? ' · scanning' : ''}` : (st.scan_in_flight ? 'scanning…' : '–'));
+    kvRow(progressKV, 'tagged', total ? `${tagged.toLocaleString()} / ${total.toLocaleString()} (${pct}%)` : '–');
     kvRow(progressKV, 'untagged', st.untagged_count != null ? st.untagged_count.toLocaleString() : '–');
     kvRow(progressKV, 'ok / fail / skip', `${p.ok || 0} / ${p.fail || 0} / ${p.skip || 0}`);
     kvRow(progressKV, 'avg', p.avg_seconds ? `${p.avg_seconds.toFixed(1)}s / img` : '–');
@@ -126,7 +121,8 @@ export async function render(container, { ctx }) {
     }
 
     runKV.innerHTML = '';
-    kvRow(runKV, 'target', st.target_dir || '(unset)');
+    kvRow(runKV, 'library', (st.roots || []).join(' · '));
+    kvRow(runKV, 'target', running ? st.target_dir : '');
     kvRow(runKV, 'pid', st.pid || '–');
     kvRow(runKV, 'started', st.started_at || '–');
     if (!running && st.stopped_at) kvRow(runKV, 'stopped', st.stopped_at);
@@ -148,7 +144,6 @@ export async function render(container, { ctx }) {
     const target = targetInput.value.trim();
     const r = await postJSON('/api/start', target ? { target } : {});
     if (!r.ok) ctx.toast(r.body?.error || 'start failed');
-    targetDirty = false;
     refresh();
   });
   btnStop.addEventListener('click', async () => {

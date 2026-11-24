@@ -2,8 +2,9 @@
 
 The webui never writes the index — refresh remains vfind's job. A snapshot of
 every searchable row is decoded once and rebuilt when the database files
-change. Searchable rows are every tagged file plus every untagged file under
-`browse_roots`, so media can be located by filename before it is tagged.
+change. Searchable rows are every file under the library roots, tagged or not,
+so media can be located by filename before it is tagged. Without roots, every
+tagged file in the index is searchable.
 """
 from __future__ import annotations
 
@@ -257,12 +258,13 @@ def _build(roots: tuple[str, ...]) -> Snapshot | None:
     conn = _open_ro()
     if conn is None:
         return None
-    clauses = ["payload IS NOT NULL"]
+    clauses: list[str] = []
     params: list[str] = []
     for root in roots:
         clauses.append("(path >= ? AND path < ?)")
         params += [root + os.sep, root + chr(ord(os.sep) + 1)]
-    sql = f"SELECT path, mtime, size, payload FROM images WHERE {' OR '.join(clauses)} ORDER BY mtime DESC"
+    where = " OR ".join(clauses) if clauses else "payload IS NOT NULL"
+    sql = f"SELECT path, mtime, size, payload FROM images WHERE {where} ORDER BY mtime DESC"
     try:
         rows = conn.execute(sql, params).fetchall()
     except sqlite3.Error as exc:
