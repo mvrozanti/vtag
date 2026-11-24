@@ -133,6 +133,13 @@ class _Parser:
         return _never
 
 
+def plain_terms(q: str) -> list[str] | None:
+    tokens = _tokenize(q)
+    if not tokens or any(kind != "TERM" for kind, _ in tokens):
+        return None
+    return [value for _, value in tokens]
+
+
 def compile_query(q: str, term_scorer: Callable[[str], Scorer]) -> Scorer:
     tokens = _tokenize(q)
     if not tokens:

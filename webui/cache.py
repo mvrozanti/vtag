@@ -24,6 +24,7 @@ from typing import Any
 import find
 import fuzzymatch
 import searchquery
+import wording
 from searchquery import Hit
 
 log = logging.getLogger("vtag-webui.cache")
@@ -37,6 +38,9 @@ TIER_NAME = 100.0
 TIER_NAME_SQUASHED = 90.0
 TIER_TEXT = 80.0
 TIER_TEXT_SQUASHED = 70.0
+TIER_PHRASE = 1000.0
+TIER_PHRASE_SQUASHED = 900.0
+FULL_WEIGHT_LENGTH = 3
 
 
 def _media_kind(path: str) -> str:
@@ -116,7 +120,9 @@ def _doc(
     taken: dict[str, "Doc"] | None = None,
 ) -> Doc:
     basename = os.path.basename(path)
-    text = fuzzymatch.FIELD_BREAK.join(_text_fields(payload, _reldir(path, roots)))
+    written = wording.normalize(fuzzymatch.FIELD_BREAK.join(_text_fields(payload, _reldir(path, roots))))
+    spelled = wording.expand(written)
+    text = written if spelled == written else written + fuzzymatch.FIELD_BREAK + spelled
     source = (payload or {}).get("source") or {}
     content_sha = str(source.get("sha256") or "").lower()
     sha = "" if taken is not None and content_sha in taken else content_sha
@@ -133,30 +139,58 @@ def _doc(
         stem=os.path.splitext(basename)[0],
         name=basename.lower(),
         name_squashed=fuzzymatch.squash(basename),
-        text=text.lower(),
+        text=text,
         text_squashed=fuzzymatch.squash(text),
     )
 
 
+def _tier(needle: str, squashed: str, doc: Doc) -> float | None:
+    if needle and needle in doc.name:
+        return TIER_NAME
+    if squashed and squashed in doc.name_squashed:
+        return TIER_NAME_SQUASHED
+    if needle and needle in doc.text:
+        return TIER_TEXT
+    if squashed and squashed in doc.text_squashed:
+        return TIER_TEXT_SQUASHED
+    return None
+
+
 def _term_scorer(term: str) -> searchquery.Scorer:
-    needle = term.lower()
-    squashed = fuzzymatch.squash(term)
+    forms = [(form, fuzzymatch.squash(form)) for form in wording.variants(term)]
+    squashed = forms[0][1]
     fuzzy = fuzzymatch.eligible(squashed)
 
     def run(doc: Doc) -> Hit | None:
-        if needle and needle in doc.name:
-            return Hit(TIER_NAME)
-        if squashed and squashed in doc.name_squashed:
-            return Hit(TIER_NAME_SQUASHED)
-        if needle and needle in doc.text:
-            return Hit(TIER_TEXT)
-        if squashed and squashed in doc.text_squashed:
-            return Hit(TIER_TEXT_SQUASHED)
+        best: float | None = None
+        for needle, folded in forms:
+            tier = _tier(needle, folded, doc)
+            if tier is not None:
+                weighted = tier * min(1.0, len(folded) / FULL_WEIGHT_LENGTH)
+                best = weighted if best is None else max(best, weighted)
+        if best is not None:
+            return Hit(best)
         if fuzzy:
             q = fuzzymatch.quality(squashed, doc.stem)
             if q is not None:
                 return Hit(q, fuzzy=True)
         return None
+
+    return run
+
+
+def _phrase_scorer(query: str):
+    terms = searchquery.plain_terms(query)
+    if not terms or len(terms) < 2:
+        return None
+    forms = [(form, fuzzymatch.squash(form)) for form in wording.variants(" ".join(terms))]
+
+    def run(doc: Doc) -> float:
+        if any(needle in doc.text or needle in doc.name for needle, _ in forms):
+            return TIER_PHRASE
+        if any(folded and (folded in doc.text_squashed or folded in doc.name_squashed) for _, folded in forms):
+            return TIER_PHRASE_SQUASHED
+        return 0.0
 
     return run
 
@@ -209,6 +243,7 @@ class Snapshot:
         ctype = (content_type or "").strip().lower() or None
         mkind = (media or "").strip().lower() or None
         scorer = searchquery.compile_query(raw, _term_scorer) if raw else None
+        phrase = _phrase_scorer(raw) if raw else None
 
         hits: list[tuple[Hit, Doc]] = []
         for doc in self.docs:
@@ -218,7 +253,8 @@ class Snapshot:
                 continue
             hit = scorer(doc) if scorer else Hit(0.0)
             if hit is not None:
-                hits.append((hit, doc))
+                bonus = phrase(doc) if phrase else 0.0
+                hits.append((hit + Hit(bonus) if bonus else hit, doc))
         best: dict[str, tuple[Hit, Doc]] = {}
         for pair in hits:
             kept = best.get(pair[1].content)
