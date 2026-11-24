@@ -74,6 +74,7 @@ def file_stamp(path: str) -> tuple[int, int] | None:
 @dataclass(slots=True)
 class Doc:
     id: str
+    content: str
     path: str
     stamp: tuple[int, int]
     mtime: int
@@ -117,11 +118,12 @@ def _doc(
     basename = os.path.basename(path)
     text = fuzzymatch.FIELD_BREAK.join(_text_fields(payload, _reldir(path, roots)))
     source = (payload or {}).get("source") or {}
-    sha = str(source.get("sha256") or "").lower()
-    if taken is not None and sha in taken:
-        sha = ""
+    content_sha = str(source.get("sha256") or "").lower()
+    sha = "" if taken is not None and content_sha in taken else content_sha
+    doc_id = sha or path_id(path, stamp)
     return Doc(
-        id=sha or path_id(path, stamp),
+        id=doc_id,
+        content=content_sha or doc_id,
         path=path,
         stamp=stamp,
         mtime=int(mtime),
@@ -217,6 +219,12 @@ class Snapshot:
             hit = scorer(doc) if scorer else Hit(0.0)
             if hit is not None:
                 hits.append((hit, doc))
+        best: dict[str, tuple[Hit, Doc]] = {}
+        for pair in hits:
+            kept = best.get(pair[1].content)
+            if kept is None or (pair[0].score, -pair[1].mtime) > (kept[0].score, -kept[1].mtime):
+                best[pair[1].content] = pair
+        hits = [pair for pair in hits if best[pair[1].content] is pair]
         hits.sort(key=lambda h: h[0].score, reverse=True)
         fuzzy = sum(1 for h, _ in hits if h.fuzzy)
         items = [card(doc, fuzzy=h.fuzzy) for h, doc in hits[offset:offset + limit]]
