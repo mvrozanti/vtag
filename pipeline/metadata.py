@@ -57,6 +57,18 @@ def _sidecar_path(media_path: Path) -> Path:
     return media_path.with_name(media_path.name + SIDECAR_SUFFIX)
 
 
+def _sidecar_roots() -> tuple[str, ...]:
+    raw = os.getenv("VTAG_SIDECAR_ROOTS", "")
+    return tuple(r.rstrip(os.sep) + os.sep for r in raw.split(os.pathsep) if r.strip())
+
+
+def _write_target(media_path: Path) -> Path | None:
+    path = str(media_path.resolve())
+    if any(path.startswith(root) for root in _sidecar_roots()):
+        return _sidecar_path(media_path)
+    return None
+
+
 def is_sidecar_format(media_path: Path) -> bool:
     return media_path.suffix.lower() in SIDECAR_EXTS
 
@@ -449,7 +461,7 @@ def write(image_path: Path, tagged: schema.TaggedImage, *, preserve_labels: bool
             tagged.user_labels = list(prior.user_labels)
 
     try:
-        _do_write(image_path, tagged, target_override=None)
+        _do_write(image_path, tagged, target_override=_write_target(image_path))
     except MetadataError as exc:
         # MP4/MOV write can fail when exiftool refuses to rewrite the
         # container (fragmented MP4 with sidx, etc.) — fall back to a
