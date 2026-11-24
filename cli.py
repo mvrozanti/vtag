@@ -5,11 +5,13 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
 import config
+import find
 import runstate
 from pipeline import dispatcher, metadata, preprocess, schema
 
@@ -24,7 +26,9 @@ def _run_cmd(args: argparse.Namespace, label: str) -> list[str]:
         cmd.append("-r")
     if args.force:
         cmd.append("-f")
-    if args.from_file:
+    if args.untagged:
+        cmd.append("--untagged")
+    elif args.from_file:
         cmd += ["--from-file", label]
     else:
         cmd.append(label)
@@ -68,12 +72,56 @@ def _iter_images(root: Path, recursive: bool) -> list[Path]:
     return sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
 
 
+def _library_roots() -> list[Path]:
+    return find._expand_roots(os.getenv("VTAG_SEARCH_ROOTS", ""))
+
+
+def _refresh_index(roots: list[Path]) -> None:
+    conn = find._open_db()
+    try:
+        files = find._iter_image_files(roots)
+        find._sync_cache(conn, files)
+        find._prune_missing(conn, {p for p, _m, _s in files}, roots)
+    finally:
+        conn.close()
+
+
+def _untagged_in_library(roots: list[Path]) -> list[Path]:
+    _refresh_index(roots)
+    conn = find._open_db()
+    try:
+        rows = conn.execute(
+            "SELECT path FROM images WHERE payload IS NULL ORDER BY mtime DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        Path(path) for (path,) in rows
+        if find._under_roots(path, roots) and Path(path).suffix.lower() in IMAGE_EXTS
+    ]
+
+
 async def _busy_handler(busy):
     log.warning("GPU busy: %s; retrying in %.0fs", busy, config.GPU_BUSY_RETRY_SECONDS)
 
 
 async def cmd_tag(args: argparse.Namespace) -> int:
-    if args.from_file:
+    library: list[Path] = []
+    if args.untagged:
+        if args.path or args.from_file:
+            log.error("--untagged takes no path or --from-file")
+            return 2
+        library = _library_roots()
+        if not library:
+            log.error("--untagged needs VTAG_SEARCH_ROOTS naming existing folders")
+            return 2
+        images = _untagged_in_library(library)
+        log.info("%d untagged file(s) under %s", len(images), ", ".join(map(str, library)))
+        if not images:
+            return 0
+        run_label = "untagged under " + ", ".join(map(str, library))
+        single_file = False
+    elif args.from_file:
         list_path = Path(args.from_file).expanduser()
         if not list_path.exists():
             log.error("list file does not exist: %s", list_path)
@@ -181,6 +229,11 @@ async def cmd_tag(args: argparse.Namespace) -> int:
         )
         return 0 if failed_n == 0 else 1
     finally:
+        if library:
+            try:
+                _refresh_index(library)
+            except Exception as exc:
+                log.warning("index refresh after the run failed: %s", exc)
         _detach_file_log(file_handler)
         runstate.finish(log_path)
 
@@ -423,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
     p_tag = sub.add_parser("tag", help="Tag an image or directory")
     p_tag.add_argument("path", nargs="?", help="Image file or directory")
     p_tag.add_argument("--from-file", help="Newline-separated list of image paths to tag")
+    p_tag.add_argument("--untagged", action="store_true",
+                       help="Tag every file under VTAG_SEARCH_ROOTS that has no payload yet, newest first")
     p_tag.add_argument("-r", "--recursive", action="store_true", help="Recurse into subdirs")
     p_tag.add_argument("-f", "--force", action="store_true", help="Re-tag even if already embedded")
     p_tag.add_argument("-v", "--verbose", action="store_true", help="Log SKIPs")
